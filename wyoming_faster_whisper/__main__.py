@@ -2,9 +2,11 @@
 import argparse
 import asyncio
 import logging
+import os
 import platform
 import re
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import faster_whisper
@@ -28,6 +30,29 @@ if TYPE_CHECKING:
     from .name_cache import HassNameCache
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_secret(value: Optional[str], env_var: str) -> Optional[str]:
+    """Resolve a CLI value from a matching env var or its ``_FILE`` variant.
+
+    Precedence: explicit CLI flag > ``<env_var>_FILE`` (docker secrets) >
+    ``<env_var>``. The CLI flag always wins so an explicit argument can never
+    be silently shadowed by a stale env var left over in the container.
+    Compose/Swarm secrets are mounted as files, not env vars, so the token
+    and API URL need the same ``_FILE``-suffix convention as speech-to-phrase
+    rather than requiring the plaintext value in the environment.
+    """
+    if value is not None:
+        return value
+
+    file_path = os.environ.get(f"{env_var}_FILE")
+    if file_path:
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SystemExit(f"Could not read {env_var}_FILE ({file_path}): {exc}")
+
+    return os.environ.get(env_var)
 
 
 async def main() -> None:
@@ -157,13 +182,16 @@ async def main() -> None:
     # Home Assistant name biasing (extra: hass)
     parser.add_argument(
         "--hass-token",
+        default=None,
         help="Long-lived access token for Home Assistant. Enables biasing toward "
-        "the names of exposed entities, areas, and floors (extra: hass)",
+        "the names of exposed entities, areas, and floors (extra: hass). Falls "
+        "back to the HASS_TOKEN env var, or HASS_TOKEN_FILE for a mounted secret.",
     )
     parser.add_argument(
         "--hass-api",
-        default=HASS_API_URL,
-        help=f"URL of the Home Assistant API (default: {HASS_API_URL})",
+        default=None,
+        help=f"URL of the Home Assistant API (default: {HASS_API_URL}). Falls back "
+        "to the HASS_API env var, or HASS_API_FILE for a mounted secret.",
     )
     parser.add_argument(
         "--hass-refresh-seconds",
@@ -198,6 +226,9 @@ async def main() -> None:
         help="Print version and exit",
     )
     args = parser.parse_args()
+
+    args.hass_token = _resolve_secret(args.hass_token, "HASS_TOKEN")
+    args.hass_api = _resolve_secret(args.hass_api, "HASS_API") or HASS_API_URL
 
     if not args.download_dir:
         # Download to first data dir by default
