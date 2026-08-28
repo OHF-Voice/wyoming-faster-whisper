@@ -60,11 +60,43 @@ are used, or none at all, and the transcript still comes back.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--hass-token` | | Long-lived access token. Enables everything above. |
-| `--hass-api` | `http://homeassistant.local:8123/api` | Where to find Home Assistant. |
+| `--hass-token` | | Long-lived access token. Enables everything above. Falls back to `HASS_TOKEN`, or `HASS_TOKEN_FILE` to read it from a file (docker secrets). |
+| `--hass-api` | `http://homeassistant.local:8123/api` | Where to find Home Assistant. Falls back to `HASS_API`, or `HASS_API_FILE` to read it from a file (docker secrets). |
 | `--hass-refresh-seconds` | `0` | Minimum seconds between refreshes. `0` refreshes every utterance, so a rename takes effect immediately. |
 | `--hass-prompt-max-tokens` | `200` | Token budget for names. Whisper's hard cap is 223 and quality falls off before it. |
 | `--hass-prompt-timeout` | `1.0` | How long to wait on an unfinished refresh before transcribing with the names already on hand. |
+
+`--hass-token` and `--hass-api` also fall back to environment variables —
+`HASS_TOKEN` / `HASS_API` — so the token doesn't have to live in a command-line
+argument. Each also has a `_FILE` variant (`HASS_TOKEN_FILE`, `HASS_API_FILE`)
+that names a file to read the value from instead, the convention Docker Compose
+and Swarm secrets use: a secret is mounted as a file under `/run/secrets/`, not
+delivered as an env var, so the env var instead points at the file. Precedence
+is CLI flag, then `_FILE`, then the plain env var — an explicit flag always
+wins.
+
+```yaml
+services:
+  whisper:
+    image: rhasspy/wyoming-whisper
+    command: ["--model", "tiny-int8", "--language", "en"]
+    ports:
+      - "10300:10300"
+    volumes:
+      - ./data:/data
+    environment:
+      HASS_TOKEN_FILE: /run/secrets/hass_token
+      HASS_API_FILE: /run/secrets/hass_api
+    secrets:
+      - hass_token
+      - hass_api
+
+secrets:
+  hass_token:
+    file: ./secrets/hass_token.txt
+  hass_api:
+    file: ./secrets/hass_api.txt
+```
 
 A large home has more names than the budget holds. They are added in priority
 order — areas, floors, entity names, then aliases — and cut off when the budget
