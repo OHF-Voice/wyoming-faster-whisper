@@ -171,6 +171,31 @@ def test_faster_whisper_default_is_float16_on_gpu() -> None:
     assert model == "Systran/faster-whisper-small"
 
 
+def test_lithuanian_default_is_the_lithuanian_fine_tune() -> None:
+    # The generic defaults are unusable for Lithuanian (87.84% WER for base,
+    # 65.79% for small on FLEURS lt), so the language gets one model on every
+    # device rather than the size ladder.
+    for kwargs in (
+        {"is_arm": False},
+        {"is_arm": True},
+        {"is_arm": False, "gpu": True},
+        {"is_arm": True, "gpu": True},
+    ):
+        assert (
+            guess_model(SttLibrary.FASTER_WHISPER, "lt", **kwargs)
+            == "RobertasTa/paprika-whisper-lt-v3-ct2-int8"
+        )
+
+
+def test_lithuanian_default_does_not_leak_into_other_languages() -> None:
+    # Defensive: the branch is keyed on the language code alone, and a stray
+    # match would hand a Lithuanian-only model to everyone else.
+    for language in ("en", "de", "ru", "lv", "et", None):
+        assert "paprika" not in guess_model(
+            SttLibrary.FASTER_WHISPER, language, is_arm=False
+        )
+
+
 def test_faster_whisper_gpu_default_ignores_arm() -> None:
     # A GPU-capable arm64 host (Jetson) has no reason to fall back to tiny.
     assert guess_model(
