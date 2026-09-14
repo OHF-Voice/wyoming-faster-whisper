@@ -21,8 +21,55 @@ _URL_FORMAT = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-model
 
 # Trailing silence fed to a streaming model before input_finished() so the
 # encoder can flush its final chunk. Without this, the last word(s) of an
-# utterance are dropped. Matches sherpa-onnx's own decode-files examples.
-_TAIL_PADDING_SECONDS = 0.66
+# utterance are dropped: sherpa-onnx only runs the encoder once a *full* chunk
+# of frames is available, and whatever is left over when the audio ends is
+# never decoded.
+#
+# How much is needed is a property of the model rather than a constant. A chunk
+# is the encoder's `T` frames, and that varies widely between releases: 45
+# frames (0.45s) for the 2023 LibriSpeech zipformers, but 141 frames (1.41s) for
+# the 2025 Kroko ones that `--sherpa-streaming` defaults to. sherpa-onnx's own
+# decode-files examples hard-code 0.66s, which covers the former and truncates
+# the latter, so measure the model instead of trusting a number.
+#
+# That measurement is a floor rather than the whole answer: it is what the
+# encoder needs to see every frame, but a transducer emits its last tokens a
+# little after the audio they belong to, so keep sherpa-onnx's 0.66s as a
+# minimum. Below it the 2023 models drop a final short word they otherwise get.
+_MIN_TAIL_PADDING_SECONDS = 0.66
+_TAIL_PADDING_PROBE_SECONDS = 0.02
+_MAX_TAIL_PADDING_SECONDS = 5.0
+_FALLBACK_TAIL_PADDING_SECONDS = 1.5
+
+
+def _measure_tail_padding(recognizer: "so.OnlineRecognizer") -> int:
+    """Return the samples of trailing silence needed to flush the final chunk.
+
+    A fresh stream reports ready as soon as one full chunk of frames has
+    arrived, so the audio it takes to get there from empty is exactly the
+    worst case for a partially-filled chunk at the end of an utterance.
+    """
+    step = int(_TAIL_PADDING_PROBE_SECONDS * _RATE)
+    min_samples = int(_MIN_TAIL_PADDING_SECONDS * _RATE)
+    max_samples = int(_MAX_TAIL_PADDING_SECONDS * _RATE)
+    silence = np.zeros(step, dtype=np.float32)
+
+    stream = recognizer.create_stream()
+    samples = 0
+    while samples < max_samples:
+        stream.accept_waveform(_RATE, silence)
+        samples += step
+        if recognizer.is_ready(stream):
+            samples = max(samples, min_samples)
+            _LOGGER.debug("Tail padding: %.2f second(s)", samples / _RATE)
+            return samples
+
+    _LOGGER.warning(
+        "Could not determine the chunk size of the streaming model; "
+        "using %.2f second(s) of tail padding",
+        _FALLBACK_TAIL_PADDING_SECONDS,
+    )
+    return int(_FALLBACK_TAIL_PADDING_SECONDS * _RATE)
 
 
 def _ensure_model(
@@ -227,9 +274,15 @@ class SherpaStreamingTranscriber(Transcriber):
             max_active_paths=max(beam_size, 1),
         )
 
-        # Prime model so that the first transcription will be fast
+        self.tail_padding_samples = _measure_tail_padding(self.recognizer)
+
+        # Prime model so that the first transcription will be fast. This needs a
+        # whole chunk of audio: with less, the recognizer never reports ready
+        # and the encoder is not run at all.
         stream = self.recognizer.create_stream()
-        stream.accept_waveform(_RATE, np.zeros(shape=(128), dtype=np.float32))
+        stream.accept_waveform(
+            _RATE, np.zeros(shape=self.tail_padding_samples, dtype=np.float32)
+        )
         while self.recognizer.is_ready(stream):
             self.recognizer.decode_stream(stream)
 
@@ -243,7 +296,7 @@ class SherpaStreamingTranscriber(Transcriber):
         beam_size: int = 5,
         initial_prompt: Optional[str] = None,
     ) -> StreamingSession:
-        return SherpaStreamingSession(self.recognizer)
+        return SherpaStreamingSession(self.recognizer, self.tail_padding_samples)
 
     def transcribe(
         self,
@@ -271,8 +324,11 @@ class SherpaStreamingTranscriber(Transcriber):
 class SherpaStreamingSession(StreamingSession):
     """A single in-progress streaming transcription for OnlineRecognizer."""
 
-    def __init__(self, recognizer: "so.OnlineRecognizer") -> None:
+    def __init__(
+        self, recognizer: "so.OnlineRecognizer", tail_padding_samples: int
+    ) -> None:
         self.recognizer = recognizer
+        self.tail_padding_samples = tail_padding_samples
         self.stream = recognizer.create_stream()
         self._leftover: bytes = b""
 
@@ -303,7 +359,7 @@ class SherpaStreamingSession(StreamingSession):
 
         # Feed trailing silence so the encoder can flush its final chunk;
         # otherwise the last word(s) of the utterance are cut off.
-        tail_padding = np.zeros(int(_TAIL_PADDING_SECONDS * _RATE), dtype=np.float32)
+        tail_padding = np.zeros(self.tail_padding_samples, dtype=np.float32)
         self.stream.accept_waveform(_RATE, tail_padding)
 
         # Signal end of audio and flush any remaining frames.

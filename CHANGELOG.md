@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Streaming sherpa-onnx models no longer cut off the last word or two of an
+  utterance. The trailing silence fed before `input_finished()` is now measured
+  from the model rather than fixed at the 0.66s in sherpa-onnx's own examples:
+  the encoder only runs on whole chunks, and a chunk is 1.41s for the Kroko
+  streaming zipformers that `--sherpa-streaming` defaults to, so the tail of
+  every utterance went undecoded. 0.66s stays the minimum for models whose
+  chunk is shorter
+  - Priming those models at startup was a no-op for the same reason — it fed
+    128 samples, far less than one chunk — so the first transcription paid for
+    the warm-up
+
 ## 3.8.0
 
 - Add optional `--vad-endpointing SECONDS` server-side command endpointing, based
