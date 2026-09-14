@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an
   utterance. The trailing silence fed before `input_finished()` is now measured
