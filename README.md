@@ -334,6 +334,7 @@ underscores and a `WYO_WHISPER_` prefix:
 | `--model` | `WYO_WHISPER_MODEL` |
 | `--language` | `WYO_WHISPER_LANGUAGE` |
 | `--stt-library` | `WYO_WHISPER_STT_LIBRARY` |
+| `--onnx-quantization` | `WYO_WHISPER_ONNX_QUANTIZATION` |
 | `--vad-endpointing` | `WYO_WHISPER_VAD_ENDPOINTING` |
 | `--hass-token` | `WYO_WHISPER_HASS_TOKEN` |
 | ...and so on for every option in `--help` | |

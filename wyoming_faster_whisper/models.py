@@ -43,6 +43,7 @@ class ModelLoader:
         local_files_only: bool,
         model: Optional[str],
         compute_type: str,
+        onnx_quantization: Optional[str],
         device: str,
         beam_size: int,
         cpu_threads: int,
@@ -68,6 +69,7 @@ class ModelLoader:
         # faster-whisper only. On a GPU an unspecified compute type becomes
         # float16 rather than the model's own (int8, for the defaults here).
         self.compute_type = resolve_compute_type(compute_type, device)
+        self.onnx_quantization = onnx_quantization
 
         self.beam_size = beam_size
         self.cpu_threads = cpu_threads
@@ -266,6 +268,7 @@ class ModelLoader:
                 cache_dir=self.download_dir,
                 local_files_only=local_files_only,
                 device=self.device,
+                quantization=self.onnx_quantization,
             )
 
         if stt_library == SttLibrary.TRANSFORMERS:

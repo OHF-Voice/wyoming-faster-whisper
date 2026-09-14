@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `--onnx-quantization` to select quantized onnx-asr model artifacts, such
+  as `int8`, reducing memory use on constrained hosts (#102)
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an
