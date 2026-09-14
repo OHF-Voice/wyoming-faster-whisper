@@ -25,6 +25,7 @@ class OnnxAsrTranscriber(Transcriber):
         cache_dir: Union[str, Path],
         local_files_only: bool,
         device: str = "cpu",
+        quantization: Optional[str] = None,
     ) -> None:
         """Initialize model."""
         warn_if_no_onnx_gpu(device, ort.get_available_providers())
@@ -38,7 +39,9 @@ class OnnxAsrTranscriber(Transcriber):
 
         with patch("huggingface_hub.snapshot_download", snapshot_download_with_cache):
             self.onnx_model = onnx_asr.load_model(
-                model_id, providers=onnx_providers(device)
+                model_id,
+                providers=onnx_providers(device),
+                quantization=quantization,
             )
 
     def transcribe(
