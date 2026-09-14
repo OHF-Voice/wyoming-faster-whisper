@@ -501,3 +501,35 @@ async def test_clipping_is_attempted_for_a_named_library():
         await _utterance(handler)
 
     assert clipped == [handler._wav_path]
+
+
+# --- the language that reaches the loader ---------------------------------
+
+
+def _language_after(requested, preferred="en"):
+    """Report what the handler resolves a client's Transcribe language to."""
+    handler = _handler(FakeTranscriber())
+    handler._loader.preferred_language = preferred  # noqa: SLF001
+    asyncio.run(handler.handle_event(Transcribe(language=requested).event()))
+    return handler._language  # noqa: SLF001
+
+
+def test_auto_language_is_treated_as_no_language() -> None:
+    """A client can ask for detection by name; backends spell that as None.
+
+    Passing "auto" through would reach whisper_language, which warns on every
+    utterance and then auto-detects anyway.
+    """
+    assert _language_after("auto", preferred=None) is None
+
+
+def test_auto_language_still_falls_back_to_the_preferred_language() -> None:
+    assert _language_after("auto", preferred="de") == "de"
+
+
+def test_explicit_language_is_kept() -> None:
+    assert _language_after("fr", preferred="de") == "fr"
+
+
+def test_missing_language_falls_back_to_the_preferred_language() -> None:
+    assert _language_after(None, preferred="de") == "de"
