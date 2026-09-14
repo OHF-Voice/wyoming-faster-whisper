@@ -43,7 +43,7 @@ import onnxruntime as ort
 from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 
-from .const import Transcriber
+from .const import Transcriber, qwen3_asr_language
 from .device import onnx_providers, warn_if_no_onnx_gpu
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,54 +97,6 @@ _MERGED_DECODER = "decoder_merged.int4.onnx"
 
 # Additive attention mask: 0 where attending is allowed, this where it is not.
 _MASK_BLOCKED = np.finfo(np.float32).min
-
-# Language names the model was trained to accept in the forced-language suffix.
-_LANGUAGE_NAMES = {
-    "ar": "Arabic",
-    "cs": "Czech",
-    "da": "Danish",
-    "de": "German",
-    "el": "Greek",
-    "en": "English",
-    "es": "Spanish",
-    "fa": "Persian",
-    "fi": "Finnish",
-    "fil": "Filipino",
-    "fr": "French",
-    "hi": "Hindi",
-    "hu": "Hungarian",
-    "id": "Indonesian",
-    "it": "Italian",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "mk": "Macedonian",
-    "ms": "Malay",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
-    "sv": "Swedish",
-    "th": "Thai",
-    "tr": "Turkish",
-    "vi": "Vietnamese",
-    "yue": "Cantonese",
-    "zh": "Chinese",
-}
-
-
-def qwen3_asr_language(language: Optional[str]) -> Optional[str]:
-    """Normalize a language code to a Qwen3-ASR language name, or None."""
-    if not language:
-        return None
-
-    code = language.lower()
-    name = _LANGUAGE_NAMES.get(code)
-    if name is None:
-        # Accept locale-style codes like "en-US" or "zh-CN".
-        name = _LANGUAGE_NAMES.get(code.split("-", maxsplit=1)[0])
-
-    return name
 
 
 def _mel_filterbank() -> np.ndarray:

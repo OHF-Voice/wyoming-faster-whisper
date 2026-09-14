@@ -6,11 +6,22 @@ import logging
 import platform
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple, Union
+from typing import AbstractSet, Any, Dict, Optional, Set, Tuple, Union
 
-from .const import SttLibrary, Transcriber, sense_voice_language
+from .const import (
+    GIGAAM_LANGUAGES,
+    KROKO_STREAMING_LANGUAGES,
+    PARAKEET_LANGUAGES,
+    QWEN3_ASR_LANGUAGES,
+    SENSE_VOICE_LANGUAGES,
+    SttLibrary,
+    Transcriber,
+    base_language,
+    sense_voice_language,
+)
 from .device import is_gpu, resolve_compute_type
 from .faster_whisper_handler import FasterWhisperTranscriber
+from .languages import WHISPER_LANGUAGES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +96,7 @@ class ModelLoader:
             asyncio.Lock
         )
         self._stt_library: Dict[Optional[str], SttLibrary] = {}
+        self._available: Optional[Dict[str, bool]] = None
 
     def resolve_stt_library(self, language: Optional[str] = None) -> SttLibrary:
         """Resolve which speech-to-text library will be used for a language.
@@ -98,45 +110,77 @@ class ModelLoader:
         if cached is not None:
             return cached
 
-        # Detect which backends are installed *without* importing them. Importing
-        # a backend loads its native libraries (sherpa-onnx, torch, onnxruntime,
-        # funasr); some of those abort the whole process at import time on certain
-        # CPUs (e.g. torch's LSE atomics SIGILL on the Raspberry Pi 4's ARMv8.0
-        # Cortex-A72). We only want to pay that cost - and take that risk - for the
-        # single backend actually selected below, so probe with find_spec here and
-        # defer the real import to the branch that instantiates the transcriber.
-        has_sherpa = _module_available("sherpa_onnx")
-        has_transformers = _module_available("transformers") and _module_available(
-            "torch"
-        )
-        has_onnx_asr = _module_available("onnx_asr")
-        has_funasr = _module_available("funasr")
-        has_qwen3_asr = _module_available("onnxruntime") and _module_available(
-            "tokenizers"
-        )
-        _LOGGER.debug(
-            "Backends available: sherpa=%s transformers=%s onnx_asr=%s funasr=%s"
-            " qwen3_asr=%s",
-            has_sherpa,
-            has_transformers,
-            has_onnx_asr,
-            has_funasr,
-            has_qwen3_asr,
-        )
-
         # Select speech-to-text library
         stt_library = guess_stt_library(
             self.preferred_stt_library,
             self.model,
             language,
-            has_transformers=has_transformers,
-            has_sherpa=has_sherpa,
-            has_onnx_asr=has_onnx_asr,
-            has_funasr=has_funasr,
-            has_qwen3_asr=has_qwen3_asr,
+            **self._available_backends(),
         )
         self._stt_library[language] = stt_library
         return stt_library
+
+    def _available_backends(self) -> Dict[str, bool]:
+        """Report which backends are installed.
+
+        Detected *without* importing them: importing a backend loads its native
+        libraries (sherpa-onnx, torch, onnxruntime, funasr), and some of those
+        abort the whole process at import time on certain CPUs (e.g. torch's LSE
+        atomics SIGILL on the Raspberry Pi 4's ARMv8.0 Cortex-A72). We only want
+        to pay that cost - and take that risk - for the single backend actually
+        selected, so probe with find_spec here and defer the real import to the
+        branch that instantiates the transcriber.
+
+        Memoized because supported_languages() resolves a backend for every
+        candidate language, and find_spec is not free.
+        """
+        if self._available is not None:
+            return self._available
+
+        available = {
+            "has_sherpa": _module_available("sherpa_onnx"),
+            "has_transformers": _module_available("transformers")
+            and _module_available("torch"),
+            "has_onnx_asr": _module_available("onnx_asr"),
+            "has_funasr": _module_available("funasr"),
+            "has_qwen3_asr": _module_available("onnxruntime")
+            and _module_available("tokenizers"),
+        }
+        _LOGGER.debug("Backends available: %s", available)
+
+        self._available = available
+        return available
+
+    def supported_languages(self) -> Set[str]:
+        """Report the language codes this configuration can actually transcribe.
+
+        Resolved per language rather than per backend, because under --stt-library
+        auto the backend is chosen *by* language: "en" may go to sherpa while "de"
+        falls through to faster-whisper. So walk every code any backend claims and
+        keep the ones whose resolved backend actually supports them. That
+        automatically follows the routing in guess_stt_library, including its
+        fallback to faster-whisper when an explicitly requested backend is not
+        installed.
+
+        These are the sets for each backend's *default* model. An explicit
+        --model can be narrower (a whisper ".en" checkpoint is handled below;
+        an arbitrary sherpa or ONNX model id cannot be inspected without
+        downloading it).
+        """
+        if is_english_only_model(self.model) and self.resolve_stt_library() in (
+            SttLibrary.FASTER_WHISPER,
+            SttLibrary.TRANSFORMERS,
+        ):
+            return {"en"}
+
+        languages: Set[str] = set()
+        for language in ALL_LANGUAGES:
+            stt_library = self.resolve_stt_library(language)
+            streaming = self.sherpa_streaming and (stt_library == SttLibrary.SHERPA)
+            if language in library_languages(stt_library, streaming=streaming):
+                languages.add(language)
+
+        return languages
 
     def should_vad_clip(self, language: Optional[str] = None) -> bool:
         """Report whether leading/trailing silence should be clipped."""
@@ -366,6 +410,56 @@ def is_distil_whisper(model: Optional[str]) -> bool:
     return (model is not None) and ("distil" in model.lower())
 
 
+# Every code any backend might claim. supported_languages() filters this down to
+# the ones the configured backend really handles. The non-Whisper entries are the
+# region-qualified and out-of-Whisper codes (zh-HK, fil) that would otherwise
+# never be considered.
+ALL_LANGUAGES = (
+    WHISPER_LANGUAGES
+    | PARAKEET_LANGUAGES
+    | KROKO_STREAMING_LANGUAGES
+    | GIGAAM_LANGUAGES
+    | SENSE_VOICE_LANGUAGES
+    | QWEN3_ASR_LANGUAGES
+)
+
+
+def library_languages(
+    stt_library: SttLibrary, *, streaming: bool = False
+) -> AbstractSet[str]:
+    """Report the languages a backend's default model can transcribe."""
+    if stt_library == SttLibrary.SHERPA:
+        return KROKO_STREAMING_LANGUAGES if streaming else PARAKEET_LANGUAGES
+
+    if stt_library == SttLibrary.ONNX_ASR:
+        return GIGAAM_LANGUAGES
+
+    if stt_library == SttLibrary.FUNASR:
+        return SENSE_VOICE_LANGUAGES
+
+    if stt_library == SttLibrary.QWEN3_ASR:
+        return QWEN3_ASR_LANGUAGES
+
+    # faster-whisper and transformers both run Whisper checkpoints. AUTO only
+    # reaches here as a fallback, which is faster-whisper.
+    return WHISPER_LANGUAGES
+
+
+def is_english_only_model(model: Optional[str]) -> bool:
+    """Report whether a model id names an English-only Whisper checkpoint.
+
+    Whisper publishes ".en" variants (tiny.en, base.en, distil-small.en) whose
+    tokenizer has no language tokens at all, so they transcribe English whatever
+    language is requested. Reporting the full multilingual list for one would
+    let Home Assistant route any pipeline to it.
+    """
+    if model is None:
+        return False
+
+    name = model.lower().split("/")[-1]
+    return name.endswith(".en") or (".en-" in name)
+
+
 def guess_stt_library(
     preferred_stt_library: SttLibrary,
     model: Optional[str],
@@ -386,11 +480,17 @@ def guess_stt_library(
     """
     if preferred_stt_library == SttLibrary.AUTO:
         if model is None:  # auto-select a per-language backend
-            if (language == "ru") and has_onnx_asr:
+            # Compared by base language so "en-US" and "EN" route like "en".
+            # Home Assistant sends back the bare code we advertised, but
+            # --language is typed by hand and other Wyoming clients send
+            # whatever they like; sense_voice_language below already normalizes.
+            base = base_language(language) if language else None
+
+            if (base == "ru") and has_onnx_asr:
                 # Prefer GigaAM via onnx-asr
                 return SttLibrary.ONNX_ASR
 
-            if (language == "en") and has_sherpa:
+            if (base == "en") and has_sherpa:
                 # Prefer Parakeet via sherpa for English. The v3 Parakeet model
                 # claims to auto detect other languages, but it doesn't work.
                 return SttLibrary.SHERPA
@@ -435,17 +535,20 @@ def guess_model(
     backends' default models are published in a single quantization, so there is
     nothing to switch to.
     """
+    # Selected by base language, matching guess_stt_library above.
+    base = base_language(language) if language else None
+
     if stt_library == SttLibrary.SHERPA:
         if streaming:
             # Best available streaming (OnlineRecognizer) model. The Kroko
             # streaming zipformers produce mixed-case, punctuated output with
             # much better accuracy than the older LibriSpeech models. They are
             # per-language, so warn for languages we don't have a default for.
-            if language in (None, "en"):
+            if base in (None, "en"):
                 return "sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
 
-            if language in ("de", "es", "fr"):
-                return f"sherpa-onnx-streaming-zipformer-{language}-kroko-2025-08-06"
+            if base in ("de", "es", "fr"):
+                return f"sherpa-onnx-streaming-zipformer-{base}-kroko-2025-08-06"
 
             _LOGGER.warning(
                 "No default streaming sherpa model for language '%s'; pass "
@@ -454,14 +557,14 @@ def guess_model(
             )
             return "sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"
 
-        if language == "en":
+        if base == "en":
             return "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
 
         # Non-English
         return "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 
     if stt_library == SttLibrary.TRANSFORMERS:
-        if language == "en":
+        if base == "en":
             if is_arm:
                 return "openai/whisper-tiny.en"
 
