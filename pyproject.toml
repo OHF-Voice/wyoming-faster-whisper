@@ -76,7 +76,7 @@ sherpa = [
     "sherpa-onnx>=1.12.19,<2",
 ]
 onnx_asr = [
-    "onnx-asr[cpu,hub]==0.11.0",
+    "onnx-asr[cpu,hub]==0.12.0",
 ]
 funasr = [
     "funasr>=1.1.0,<2",
