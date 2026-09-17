@@ -396,3 +396,29 @@ secrets:
 In the Docker image, `--uri`, `--data-dir`, and `--device` have defaults baked
 into the entrypoint; those are dropped when the matching variable is set, so
 `WYO_WHISPER_URI` and friends work there too.
+
+## Orukeet with sherpa-onnx
+
+Orukeet is an optional local model for completed utterances. Install the
+`sherpa` extra, then select its pinned INT8 export:
+
+```sh
+pip install 'wyoming-faster-whisper[sherpa]'
+wyoming-faster-whisper --stt-library sherpa \
+    --model sherpa-onnx-orukeet-v0.1.0-int8 --language en \
+    --uri 'tcp://0.0.0.0:10300' --data-dir ./data
+```
+
+The first run downloads the release manifest and 487 MB archive from
+[Hugging Face](https://huggingface.co/oruk/orukeet), verifies SHA-256 checksums,
+and installs about 672 MB of model files. The manifest request participates in
+Hugging Face's normal model-download accounting. Cached models load without
+network access; `--local-files-only` also forbids downloading missing files.
+Audio stays on your server, and recognition makes no network requests.
+
+Orukeet supports the 25 European languages listed in its
+[model card](https://huggingface.co/oruk/orukeet). It uses the existing offline
+sherpa transducer path, so `--sherpa-streaming` is not supported and Home
+Assistant name prompts are ignored. The model weights are CC BY-SA 4.0;
+installation retains their license and NVIDIA attribution. Existing model
+selection defaults are unchanged.
