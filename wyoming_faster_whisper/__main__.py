@@ -5,20 +5,14 @@ import logging
 import platform
 import re
 from functools import partial
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import faster_whisper
 from wyoming.info import AsrModel, AsrProgram, Attribution, Info
 from wyoming.server import AsyncServer, AsyncTcpServer
 
 from . import __version__
-from .const import (
-    AUTO_LANGUAGE,
-    AUTO_MODEL,
-    HASS_API_URL,
-    PARAKEET_LANGUAGES,
-    SttLibrary,
-)
+from .const import AUTO_LANGUAGE, AUTO_MODEL, HASS_API_URL, SttLibrary, base_language
 from .dispatch_handler import DispatchEventHandler
 from .env_args import ENV_PREFIX
 from .env_args import parse_args as parse_args_with_env
@@ -277,11 +271,6 @@ async def main() -> None:
     if args.model == AUTO_MODEL:
         args.model = None
 
-    wyoming_info = build_info(
-        model_name,
-        requires_external_vad=args.vad_endpointing is None,
-    )
-
     vad_parameters: Optional[Dict[str, Any]] = None
     if args.vad_filter:
         vad_parameters = {
@@ -311,6 +300,17 @@ async def main() -> None:
     )
 
     _warn_if_prompt_unsupported(args, loader)
+
+    # Built from the loader so the advertised languages follow the backend that
+    # will actually run, not the Whisper list.
+    languages = sorted(loader.supported_languages())
+    _warn_if_language_unsupported(args.language, languages)
+    wyoming_info = build_info(
+        model_name,
+        languages,
+        requires_external_vad=args.vad_endpointing is None,
+    )
+    _LOGGER.debug("Reporting %s language(s)", len(languages))
 
     # Load model
     _LOGGER.debug("Pre-loading transcriber")
@@ -345,8 +345,20 @@ async def main() -> None:
     )
 
 
-def build_info(model_name: str, *, requires_external_vad: bool = True) -> Info:
-    """Build Wyoming service metadata."""
+def build_info(
+    model_name: str,
+    languages: List[str],
+    *,
+    requires_external_vad: bool = True,
+) -> Info:
+    """Build Wyoming service metadata.
+
+    ``languages`` comes from ModelLoader.supported_languages(): a fixed list
+    would over-report whenever a backend narrower than Whisper is configured
+    (GigaAM is Russian-only, SenseVoice covers five languages) and under-report
+    the codes Whisper has no token for (Qwen3-ASR's "fil", and "zh-HK", which
+    Home Assistant needs to route a Cantonese pipeline).
+    """
     return Info(
         asr=[
             AsrProgram(
@@ -368,14 +380,7 @@ def build_info(model_name: str, *, requires_external_vad: bool = True) -> Info:
                             url="https://huggingface.co/Systran",
                         ),
                         installed=True,
-                        languages=sorted(
-                            list(
-                                # pylint: disable=protected-access
-                                set(faster_whisper.tokenizer._LANGUAGE_CODES).union(
-                                    PARAKEET_LANGUAGES
-                                )
-                            )
-                        ),
+                        languages=languages,
                         version=faster_whisper.__version__,
                     )
                 ],
@@ -385,6 +390,33 @@ def build_info(model_name: str, *, requires_external_vad: bool = True) -> Info:
 
 
 # -----------------------------------------------------------------------------
+
+
+def _warn_if_language_unsupported(
+    language: Optional[str], languages: List[str]
+) -> None:
+    """Warn at startup when --language names something the backend cannot do.
+
+    Unvalidated, a typo or a language the configured backend does not cover only
+    shows up as every transcription being auto-detected (or, on a monolingual
+    model, silently decoded as the wrong language). A region-qualified tag is
+    accepted: the backends normalize it themselves.
+    """
+    if not language:
+        return
+
+    if language in languages:
+        return
+
+    if base_language(language) in {base_language(code) for code in languages}:
+        return
+
+    _LOGGER.warning(
+        "Language '%s' is not supported by the selected backend (supported: %s). "
+        "Transcription will fall back to auto-detection.",
+        language,
+        ", ".join(languages),
+    )
 
 
 def _warn_if_prompt_unsupported(args: argparse.Namespace, loader: ModelLoader) -> None:

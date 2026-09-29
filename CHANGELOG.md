@@ -1,5 +1,62 @@
 # Changelog
 
+## 3.9.0
+
+- The languages reported to Home Assistant now follow the backend that will
+  actually run, instead of always being Whisper's 100 codes. Backends are
+  installed dynamically downstream, so pinning one with `--stt-library` used to
+  advertise up to 99 languages it cannot transcribe — `onnx-asr` (GigaAM) is
+  Russian-only, `funasr` (SenseVoice) covers five languages, `sherpa` 25, and
+  `--sherpa-streaming` only the four published Kroko models. Under the default
+  `--stt-library auto` nothing changes: the backend is picked per language with
+  faster-whisper as the fallback, so all 100 really are supported
+  - Codes Whisper has no token for are now reportable, which is the other half
+    of the bug: `qwen3-asr` supports Filipino (`fil`), and both Cantonese-capable
+    backends now advertise `zh-HK`
+  - A `.en` Whisper checkpoint reports only `en`. It has no language tokens at
+    all, so it transcribes English whatever is requested
+  - The old `PARAKEET_LANGUAGES` union was a no-op — all 25 codes were already
+    among Whisper's 100
+
+- Cantonese is advertised as `zh-HK`, not only `yue`. Home Assistant's language
+  matcher treats `yue` and `zh` as unrelated languages, and
+  `home-assistant/intents` ships `zh-CN`/`zh-HK`/`zh-TW` with no bare `zh` or
+  `yue`, so a backend advertising only `yue` could never be reached by a
+  Cantonese pipeline
+  - `qwen3-asr` decoded `zh-HK` as Mandarin: the locale fallback stripped `-HK`
+    and forced Chinese on a model that supports Cantonese. It now matches
+    SenseVoice, which already mapped `zh-HK` to `yue`
+
+- The `transformers` backend had the same crash as faster-whisper on a code
+  Whisper has no token for: `set_prefix_tokens` raises `ValueError`, deferred to
+  `generate()`, so `pt-BR` or `ga` failed the transcription. Both backends now
+  share one normalizer in `languages.py`
+
+- Backend and model selection now compare the *base* language, so `en-US`, `EN`
+  and `en_GB` reach Parakeet the way `en` does, and `ru-RU` reaches GigaAM.
+  Previously only the SenseVoice languages normalized, and everything else
+  silently fell through to faster-whisper — no error, just a slower and less
+  accurate default. Home Assistant is unaffected (it echoes back the bare code it
+  was given), but `--language en-US` is a reasonable thing to type, and other
+  Wyoming clients send what they like
+  - Either separator is accepted, matching Home Assistant's own tag parser, so
+    `zh_HK` stays Cantonese instead of falling back to Mandarin
+
+- `--language` is now checked at startup against what the configured backend
+  reports, and warns instead of silently auto-detecting every utterance
+
+- A client asking for `auto` by name in its `transcribe` event is now treated as
+  "no language", the way `--language auto` already was, instead of being passed
+  to the backend as a language code
+
+- An unusable language code no longer fails the whole transcription on
+  faster-whisper, which raises `ValueError` for anything outside its code list.
+  Home Assistant falls back to the raw pipeline language when its matcher finds
+  nothing (Irish and Cornish are Home Assistant languages Whisper has no token
+  for) or when a pipeline has no `stt_language` stored, in which case a locale
+  tag like `pt-BR` arrives verbatim. The region is stripped when that helps,
+  otherwise the language is left to auto-detection
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an

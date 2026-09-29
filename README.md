@@ -53,6 +53,39 @@ the completed batch WAV before transcription. They can be used together with
 `--vad-endpointing`; the only intentional interaction is replacing Home
 Assistant's external endpointing while this option is enabled.
 
+## Reported Languages
+
+The Wyoming service advertises the languages the **configured backend** can
+actually transcribe, not a fixed list. Under the default `--stt-library auto` the
+backend is chosen per language, with faster-whisper as the fallback for anything
+the specialized backends don't claim, so all of Whisper's languages are reported.
+Pinning a backend narrows it:
+
+| Backend | Languages |
+| --- | --- |
+| `faster-whisper`, `transformers` | Whisper's 100 (just `en` for a `.en` checkpoint) |
+| `qwen3-asr` | 31 |
+| `sherpa` | 25 (Parakeet TDT v3) |
+| `sherpa --sherpa-streaming` | `de`, `en`, `es`, `fr` (the published Kroko models) |
+| `funasr` | `en`, `ja`, `ko`, `yue`, `zh`, `zh-CN`, `zh-HK`, `zh-TW` (SenseVoice) |
+| `onnx-asr` | `ru` (GigaAM) |
+
+`--language` is checked against this list at startup, and a region-qualified code
+is accepted everywhere — `en-US` selects the same backend and model as `en`, and
+`zh-HK`/`zh_HK` stays Cantonese rather than falling back to Mandarin.
+
+This matters because Home Assistant picks the pipeline's STT language out of this
+list. A backend that over-reports gets handed languages it will transcribe as
+gibberish; one that under-reports is unreachable for languages it handles well.
+
+Codes are reported in the form Home Assistant matches against, which is why
+Cantonese is advertised as **`zh-HK`** rather than only `yue`. Home Assistant
+treats `yue` and `zh` as unrelated languages, and `home-assistant/intents` ships
+`zh-CN`/`zh-HK`/`zh-TW` with no bare `zh` or `yue` — so a backend that says only
+`yue` can never be reached by a Cantonese pipeline. Both Cantonese-capable
+backends (`funasr`, `qwen3-asr`) advertise `zh-HK` and decode it as Cantonese,
+while `zh-CN` and `zh-TW` still fall through to Mandarin.
+
 ## Biasing Toward Your Home Assistant Names
 
 Whisper has never heard of your thermostat. "What's the temperature of the Ecobee?"

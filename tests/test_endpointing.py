@@ -49,9 +49,9 @@ def test_speech_resets_silence_countdown() -> None:
 
 
 def test_server_vad_disables_home_assistant_endpointing() -> None:
-    assert build_info("model").asr[0].requires_external_vad
+    assert build_info("model", ["en"]).asr[0].requires_external_vad
     assert (
-        not build_info("model", requires_external_vad=False)
+        not build_info("model", ["en"], requires_external_vad=False)
         .asr[0]
         .requires_external_vad
     )

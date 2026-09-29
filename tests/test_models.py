@@ -4,10 +4,21 @@ These are dependency-free: guess_stt_library takes backend-availability flags
 as arguments, so the real STT backends need not be installed.
 """
 
+import logging
+
 import pytest
 
-from wyoming_faster_whisper.const import SttLibrary
+from wyoming_faster_whisper.__main__ import _warn_if_language_unsupported
+from wyoming_faster_whisper.const import (
+    GIGAAM_LANGUAGES,
+    KROKO_STREAMING_LANGUAGES,
+    PARAKEET_LANGUAGES,
+    QWEN3_ASR_LANGUAGES,
+    SENSE_VOICE_LANGUAGES,
+    SttLibrary,
+)
 from wyoming_faster_whisper.models import (
+    WHISPER_LANGUAGES,
     ModelLoader,
     guess_model,
     guess_stt_library,
@@ -321,3 +332,187 @@ async def test_transcriber_is_only_built_once() -> None:
     first = await loader.load_transcriber()
     assert await loader.load_transcriber() is first
     assert attempts == [True, False]
+
+
+# --- reported languages ----------------------------------------------------
+
+
+def _languages(
+    preferred_stt_library=SttLibrary.AUTO,
+    model=None,
+    *,
+    sherpa_streaming=False,
+    **avail,
+) -> set:
+    """Report what a configuration would advertise, with backends faked."""
+    loader = ModelLoader(
+        preferred_stt_library=preferred_stt_library,
+        preferred_language=None,
+        download_dir="/data",
+        local_files_only=False,
+        model=model,
+        compute_type="default",
+        device="cpu",
+        beam_size=5,
+        cpu_threads=4,
+        initial_prompt=None,
+        vad_parameters=None,
+        sherpa_streaming=sherpa_streaming,
+    )
+    # _available_backends is memoized, so seeding the cache stands in for
+    # whichever extras happen to be installed in the test environment.
+    loader._available = {**_ALL_AVAILABLE, **avail}  # noqa: SLF001
+    return loader.supported_languages()
+
+
+def test_auto_reports_every_whisper_language() -> None:
+    # faster-whisper is a hard dependency and the fallback for anything the
+    # specialized backends don't claim, so auto really does cover all of them.
+    assert WHISPER_LANGUAGES <= _languages()
+
+
+def test_auto_adds_cantonese_when_funasr_is_installed() -> None:
+    # zh-HK routes to SenseVoice, which decodes it as Cantonese. Whisper has no
+    # such code, so it is only reportable because FunASR is there.
+    assert "zh-HK" in _languages(has_funasr=True)
+    assert "zh-HK" not in _languages(has_funasr=False)
+
+
+def test_auto_does_not_report_qwen3_only_languages() -> None:
+    # guess_stt_library never auto-selects qwen3-asr, so "fil" is unreachable
+    # even with the extra installed.
+    assert "fil" not in _languages(has_qwen3_asr=True)
+
+
+@pytest.mark.parametrize(
+    ("library", "expected"),
+    [
+        (SttLibrary.ONNX_ASR, GIGAAM_LANGUAGES),
+        (SttLibrary.FUNASR, SENSE_VOICE_LANGUAGES),
+        (SttLibrary.SHERPA, PARAKEET_LANGUAGES),
+        (SttLibrary.QWEN3_ASR, QWEN3_ASR_LANGUAGES),
+    ],
+)
+def test_explicit_backend_reports_only_its_own_languages(library, expected) -> None:
+    assert _languages(library) == expected
+
+
+def test_explicit_qwen3_reports_filipino_and_cantonese() -> None:
+    languages = _languages(SttLibrary.QWEN3_ASR)
+    # Neither has a Whisper token, so the old fixed list could never report them.
+    assert {"fil", "zh-HK"} <= languages
+
+
+def test_streaming_sherpa_reports_only_the_published_kroko_languages() -> None:
+    assert _languages(SttLibrary.SHERPA, sherpa_streaming=True) == (
+        KROKO_STREAMING_LANGUAGES
+    )
+    # Streaming only narrows sherpa; it is ignored for every other backend.
+    assert _languages(SttLibrary.FUNASR, sherpa_streaming=True) == (
+        SENSE_VOICE_LANGUAGES
+    )
+
+
+def test_missing_backend_falls_back_to_the_whisper_list() -> None:
+    # guess_stt_library falls back to faster-whisper when the extra is absent,
+    # and the reported languages have to follow it.
+    assert _languages(SttLibrary.ONNX_ASR, has_onnx_asr=False) == WHISPER_LANGUAGES
+
+
+def test_english_only_whisper_model_reports_only_english() -> None:
+    # A ".en" checkpoint has no language tokens at all: it transcribes English
+    # whatever is requested.
+    assert _languages(
+        SttLibrary.FASTER_WHISPER, model="Systran/faster-whisper-base.en"
+    ) == {"en"}
+    assert _languages(SttLibrary.FASTER_WHISPER, model="distil-small.en") == {"en"}
+    assert (
+        _languages(SttLibrary.FASTER_WHISPER, model="Systran/faster-whisper-base")
+        == WHISPER_LANGUAGES
+    )
+
+
+def test_auto_with_explicit_model_reports_the_whisper_list() -> None:
+    # An explicit --model turns off per-language backend selection, so
+    # faster-whisper handles everything.
+    assert _languages(model="Systran/faster-whisper-base") == WHISPER_LANGUAGES
+
+
+# --- backend selection is by base language ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        # Home Assistant echoes back the bare code we advertised, but --language
+        # is typed by hand and other Wyoming clients send what they like.
+        ("en-US", SttLibrary.SHERPA),
+        ("EN", SttLibrary.SHERPA),
+        ("en_GB", SttLibrary.SHERPA),
+        ("ru-RU", SttLibrary.ONNX_ASR),
+        # Cantonese must not be flattened to Mandarin on the way through.
+        ("zh-HK", SttLibrary.FUNASR),
+        ("de-CH", SttLibrary.FASTER_WHISPER),
+    ],
+)
+def test_locale_codes_route_like_their_base_language(language, expected) -> None:
+    assert _guess(SttLibrary.AUTO, language) == expected
+
+
+@pytest.mark.parametrize(
+    ("library", "language", "expected"),
+    [
+        (SttLibrary.SHERPA, "en-US", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"),
+        (SttLibrary.SHERPA, "de-CH", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"),
+        (SttLibrary.TRANSFORMERS, "en-US", "openai/whisper-base.en"),
+        (SttLibrary.TRANSFORMERS, "de-CH", "openai/whisper-base"),
+    ],
+)
+def test_default_model_follows_the_base_language(library, language, expected) -> None:
+    assert guess_model(library, language, is_arm=False) == expected
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        ("en-US", "sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06"),
+        ("fr_FR", "sherpa-onnx-streaming-zipformer-fr-kroko-2025-08-06"),
+        # The region must not leak into the model id.
+        ("de-CH", "sherpa-onnx-streaming-zipformer-de-kroko-2025-08-06"),
+    ],
+)
+def test_streaming_model_follows_the_base_language(language, expected) -> None:
+    assert (
+        guess_model(SttLibrary.SHERPA, language, is_arm=False, streaming=True)
+        == expected
+    )
+
+
+# --- --language validation -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "language",
+    [
+        None,  # not set
+        "ru",  # exactly what the backend reports
+        "ru-RU",  # region qualifier: the backend normalizes it itself
+        "RU",
+    ],
+)
+def test_supported_language_does_not_warn(language, caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        _warn_if_language_unsupported(language, ["ru"])
+
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("language", ["de", "xyz", "en-US"])
+def test_unsupported_language_warns(language, caplog) -> None:
+    # GigaAM is Russian-only: without this, a typo or a wrong backend only shows
+    # up as every transcription being auto-detected.
+    with caplog.at_level(logging.WARNING):
+        _warn_if_language_unsupported(language, ["ru"])
+
+    assert len(caplog.records) == 1
+    assert language in caplog.records[0].getMessage()

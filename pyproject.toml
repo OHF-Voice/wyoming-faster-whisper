@@ -1,6 +1,6 @@
 [project]
 name = "wyoming-faster-whisper"
-version = "3.8.1"
+version = "3.9.0"
 description = "Wyoming Server for Faster Whisper"
 readme = "README.md"
 requires-python = ">=3.8"
