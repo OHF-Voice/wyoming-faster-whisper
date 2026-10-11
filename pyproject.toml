@@ -70,7 +70,7 @@ dev = [
     "pytest-asyncio",
 ]
 transformers = [
-    "transformers[torch]==4.52.4",
+    "transformers[torch]==5.14.1",
 ]
 sherpa = [
     "sherpa-onnx>=1.12.19,<2",
