@@ -19,7 +19,7 @@ RUN \
         wheel \
     && .venv/bin/pip3 install --no-cache-dir \
         --extra-index-url 'https://download.pytorch.org/whl/cpu' \
-        'torch==2.6.0' \
+        'torch==2.13.0' \
     \
     && .venv/bin/pip3 install --no-cache-dir \
         --extra-index-url https://www.piwheels.org/simple \
