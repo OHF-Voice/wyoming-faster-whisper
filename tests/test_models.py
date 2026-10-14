@@ -185,11 +185,11 @@ def test_faster_whisper_default_is_float16_on_gpu() -> None:
 
 def test_lithuanian_default_is_the_lithuanian_fine_tune() -> None:
     # The generic defaults are unusable for Lithuanian (87.84% WER for base,
-    # 65.79% for small on FLEURS lt), so the language gets one model on every
-    # device rather than the size ladder.
+    # 65.79% for small on FLEURS lt), so the fine-tune replaces them on a GPU
+    # and on an x86 CPU, where it was measured. The GPU branch precedes the
+    # arm one, so a GPU-capable arm host (Jetson) gets it too.
     for kwargs in (
         {"is_arm": False},
-        {"is_arm": True},
         {"is_arm": False, "gpu": True},
         {"is_arm": True, "gpu": True},
     ):
@@ -197,6 +197,15 @@ def test_lithuanian_default_is_the_lithuanian_fine_tune() -> None:
             guess_model(SttLibrary.FASTER_WHISPER, "lt", **kwargs)
             == "RobertasTa/paprika-whisper-lt-v3-ct2-int8"
         )
+
+
+def test_lithuanian_default_leaves_cpu_only_arm_on_tiny() -> None:
+    # ~800M parameters was not measured on a CPU-only arm board, and does not
+    # fit the 256-512 MB ones at all, so that branch is left as it was.
+    assert (
+        guess_model(SttLibrary.FASTER_WHISPER, "lt", is_arm=True)
+        == "rhasspy/faster-whisper-tiny-int8"
+    )
 
 
 def test_lithuanian_default_matches_a_locale_tag() -> None:
