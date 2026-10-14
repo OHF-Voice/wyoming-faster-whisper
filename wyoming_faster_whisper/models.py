@@ -589,6 +589,31 @@ def guess_model(
         return "FunAudioLLM/SenseVoiceSmall"
 
     # faster-whisper
+    if base == "lt" and (gpu or not is_arm):
+        # For Lithuanian the generic defaults are not just weaker but unusable.
+        # Measured on FLEURS lt (986 utterances, 17,136 reference words,
+        # identical normalisation for every model):
+        #
+        #   paprika-whisper-lt-v3 (this fine-tune)  12.11%
+        #   faster-whisper-large-v3                 24.23%
+        #   faster-whisper-small   (GPU default)    65.79%
+        #   faster-whisper-base    (CPU default)    87.84%
+        #
+        # At 87.84% the CPU default does not produce a worse transcript, it
+        # produces no usable transcript at all — and it fails silently, looking
+        # like a working feature.
+        #
+        # This is a CTranslate2 int8 conversion of kristijonas/paprika-whisper-lt-v3
+        # (CC BY 4.0), a whisper-large-v3-turbo fine-tune trained on 3,281 h of
+        # the LIEPA-3 corpus by Kristijonas Jakubsonas, who published it openly.
+        #
+        # ~800M parameters, so it is used where it was measured: on a GPU
+        # (float16, 0.255 s per utterance on an RTX PRO 4500 against 0.340 s
+        # for small, ~1.25 GB more VRAM) and on an x86 CPU (2.98 s per
+        # utterance, RTF 0.32, ~1.1 GB RAM, against 0.55 s and ~0.2 GB for
+        # base-int8). A CPU-only arm host was not measured and keeps tiny-int8.
+        return "RobertasTa/paprika-whisper-lt-v3-ct2-int8"
+
     if gpu:
         # float16 weights, and one size up: a GPU can afford it, and small is
         # where Whisper's accuracy starts being worth the download. Larger

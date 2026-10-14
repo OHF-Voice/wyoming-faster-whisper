@@ -183,6 +183,49 @@ def test_faster_whisper_default_is_float16_on_gpu() -> None:
     assert model == "Systran/faster-whisper-small"
 
 
+def test_lithuanian_default_is_the_lithuanian_fine_tune() -> None:
+    # The generic defaults are unusable for Lithuanian (87.84% WER for base,
+    # 65.79% for small on FLEURS lt), so the fine-tune replaces them on a GPU
+    # and on an x86 CPU, where it was measured. The GPU branch precedes the
+    # arm one, so a GPU-capable arm host (Jetson) gets it too.
+    for kwargs in (
+        {"is_arm": False},
+        {"is_arm": False, "gpu": True},
+        {"is_arm": True, "gpu": True},
+    ):
+        assert (
+            guess_model(SttLibrary.FASTER_WHISPER, "lt", **kwargs)
+            == "RobertasTa/paprika-whisper-lt-v3-ct2-int8"
+        )
+
+
+def test_lithuanian_default_leaves_cpu_only_arm_on_tiny() -> None:
+    # ~800M parameters was not measured on a CPU-only arm board, and does not
+    # fit the 256-512 MB ones at all, so that branch is left as it was.
+    assert (
+        guess_model(SttLibrary.FASTER_WHISPER, "lt", is_arm=True)
+        == "rhasspy/faster-whisper-tiny-int8"
+    )
+
+
+def test_lithuanian_default_matches_a_locale_tag() -> None:
+    # Compared by base language, like the other defaults: --language is typed
+    # by hand, so "lt-LT" has to route like "lt".
+    assert (
+        guess_model(SttLibrary.FASTER_WHISPER, "lt-LT", is_arm=False)
+        == "RobertasTa/paprika-whisper-lt-v3-ct2-int8"
+    )
+
+
+def test_lithuanian_default_does_not_leak_into_other_languages() -> None:
+    # Defensive: the branch is keyed on the language code alone, and a stray
+    # match would hand a Lithuanian-only model to everyone else.
+    for language in ("en", "de", "ru", "lv", "et", None):
+        assert "paprika" not in guess_model(
+            SttLibrary.FASTER_WHISPER, language, is_arm=False
+        )
+
+
 def test_faster_whisper_gpu_default_ignores_arm() -> None:
     # A GPU-capable arm64 host (Jetson) has no reason to fall back to tiny.
     assert guess_model(
