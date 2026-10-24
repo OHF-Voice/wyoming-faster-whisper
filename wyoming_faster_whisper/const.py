@@ -210,6 +210,12 @@ KROKO_STREAMING_LANGUAGES = {"de", "en", "es", "fr"}
 # onnx-asr's default model is GigaAM, which is Russian-only.
 GIGAAM_LANGUAGES = {"ru"}
 
+# For Lithuanian the onnx-asr backend defaults to LT_ausys instead: a Parakeet-TDT
+# 0.6B fine-tune on 3,087 h of LIEPA-3 (kristijonas/kmynas-parakeet-lt-v4, CC BY
+# 4.0) exported to ONNX. Lithuanian-only.
+LT_AUSYS_MODEL = "RobertasTa/lt-ausys"
+LT_AUSYS_LANGUAGES = {"lt"}
+
 
 class Transcriber(ABC):
     """Base class for transcribers."""

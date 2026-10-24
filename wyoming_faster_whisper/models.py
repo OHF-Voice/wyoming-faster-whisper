@@ -11,6 +11,8 @@ from typing import AbstractSet, Any, Dict, Optional, Set, Tuple, Union
 from .const import (
     GIGAAM_LANGUAGES,
     KROKO_STREAMING_LANGUAGES,
+    LT_AUSYS_LANGUAGES,
+    LT_AUSYS_MODEL,
     PARAKEET_LANGUAGES,
     QWEN3_ASR_LANGUAGES,
     SENSE_VOICE_LANGUAGES,
@@ -305,11 +307,20 @@ class ModelLoader:
         if stt_library == SttLibrary.ONNX_ASR:
             from .onnx_asr_handler import OnnxAsrTranscriber  # noqa: F811
 
+            # LT_ausys ships int8 files (MatMul-only quantization): on a CPU the
+            # same accuracy as fp32 on a 119-command intent exam, 1.7x faster and
+            # 0.9 GB instead of 2.5 GB. A GPU keeps fp32, as the sherpa backend
+            # does with its int8 preference.
+            quantization = None
+            if (model == LT_AUSYS_MODEL) and not is_gpu(self.device):
+                quantization = "int8"
+
             return OnnxAsrTranscriber(
                 model,
                 cache_dir=self.download_dir,
                 local_files_only=local_files_only,
                 device=self.device,
+                quantization=quantization,
             )
 
         if stt_library == SttLibrary.TRANSFORMERS:
@@ -432,7 +443,9 @@ def library_languages(
         return KROKO_STREAMING_LANGUAGES if streaming else PARAKEET_LANGUAGES
 
     if stt_library == SttLibrary.ONNX_ASR:
-        return GIGAAM_LANGUAGES
+        # Two default models, chosen per language in guess_model: GigaAM for
+        # Russian, LT_ausys for Lithuanian.
+        return GIGAAM_LANGUAGES | LT_AUSYS_LANGUAGES
 
     if stt_library == SttLibrary.FUNASR:
         return SENSE_VOICE_LANGUAGES
@@ -488,6 +501,12 @@ def guess_stt_library(
 
             if (base == "ru") and has_onnx_asr:
                 # Prefer GigaAM via onnx-asr
+                return SttLibrary.ONNX_ASR
+
+            if (base == "lt") and has_onnx_asr:
+                # Prefer LT_ausys (Parakeet-TDT, Lithuanian) via onnx-asr: on a
+                # CPU ~17x faster per command than the Lithuanian Whisper
+                # fine-tune, and more accurate. Numbers in guess_model.
                 return SttLibrary.ONNX_ASR
 
             if (base == "en") and has_sherpa:
@@ -577,6 +596,22 @@ def guess_model(
         return "openai/whisper-base"
 
     if stt_library == SttLibrary.ONNX_ASR:
+        if base == "lt":
+            # LT_ausys: kristijonas/kmynas-parakeet-lt-v4 (Parakeet-TDT 0.6B v3
+            # fine-tuned on 3,087 h of LIEPA-3, CC BY 4.0) exported to ONNX for
+            # onnx-asr. Measured on one Ryzen 7 8845HS, 4 threads, greedy, no
+            # VAD, against the same CTranslate2 int8 files this server runs for
+            # the Lithuanian Whisper fine-tune (kristijonas/paprika-whisper-lt-v3):
+            #
+            #                     FLEURS lt WER  per 2-6 s command  peak RSS*
+            #   LT_ausys int8         10.58 %         0.21 s        1.6 / 2.0 GiB
+            #   Paprika CT2 int8      11.97 %         3.55 s        1.2 / 1.2 GiB
+            #   * while transcribing the commands / the FLEURS sentences
+            #
+            # Whisper pays a fixed 30 s window per utterance, which on a CPU
+            # is the 3.5 s; a transducer processes only the audio it is given.
+            return LT_AUSYS_MODEL
+
         return "gigaam-v2-rnnt"
 
     if stt_library == SttLibrary.QWEN3_ASR:
