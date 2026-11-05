@@ -15,4 +15,4 @@ defaults=()
     defaults+=(--device "${STT_DEVICE:-cpu}")
 
 # "$@" comes last so an explicit argument from the command line overrides both.
-.venv/bin/python3 -m wyoming_faster_whisper "${defaults[@]}" "$@"
+exec .venv/bin/python3 -m wyoming_faster_whisper "${defaults[@]}" "$@"
