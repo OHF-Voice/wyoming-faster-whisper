@@ -68,7 +68,7 @@ Pinning a backend narrows it:
 | `sherpa` | 25 (Parakeet TDT v3) |
 | `sherpa --sherpa-streaming` | `de`, `en`, `es`, `fr` (the published Kroko models) |
 | `funasr` | `en`, `ja`, `ko`, `yue`, `zh`, `zh-CN`, `zh-HK`, `zh-TW` (SenseVoice) |
-| `onnx-asr` | `ru` (GigaAM) |
+| `onnx-asr` | `ru` (GigaAM), `lt` (LT_ausys) |
 
 `--language` is checked against this list at startup, and a region-qualified code
 is accepted everywhere — `en-US` selects the same backend and model as `en`, and
