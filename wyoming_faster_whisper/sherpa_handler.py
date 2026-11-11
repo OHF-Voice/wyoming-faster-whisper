@@ -13,6 +13,8 @@ import sherpa_onnx as so
 
 from .const import StreamingSession, Transcriber
 from .device import is_gpu, sherpa_provider
+from .orukeet import MODEL_ID as ORUKEET_MODEL_ID
+from .orukeet import ensure_model as ensure_orukeet_model
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +79,8 @@ def _ensure_model(
 ) -> Path:
     """Download/extract a sherpa-onnx model if needed and return its directory."""
     cache_dir = Path(cache_dir)
+    if model_id == ORUKEET_MODEL_ID:
+        return ensure_orukeet_model(cache_dir, local_files_only)
     model_dir = cache_dir / model_id
     _LOGGER.debug("Looking for sherpa model: %s", model_dir)
 
@@ -250,6 +254,8 @@ class SherpaStreamingTranscriber(Transcriber):
         device: str = "cpu",
     ) -> None:
         """Initialize model."""
+        if model_id == ORUKEET_MODEL_ID:
+            raise ValueError("Orukeet is an offline model; remove --sherpa-streaming")
         model_dir = _ensure_model(model_id, cache_dir, local_files_only)
         provider = _resolve_provider(device)
         prefer_int8 = provider == "cpu"
