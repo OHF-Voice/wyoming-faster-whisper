@@ -20,17 +20,17 @@
 
 - Lithuanian is routed to the `onnx-asr` backend when it is installed, the way
   Russian is routed to GigaAM. The default model for `lt` there is
-  [`RobertasTa/lt-ausys`](https://huggingface.co/RobertasTa/lt-ausys): a
-  Parakeet-TDT 0.6B fine-tune on 3,087 h of LIEPA-3 by Kristijonas Jakubsonas
-  (`kristijonas/kmynas-parakeet-lt-v4`, CC BY 4.0) exported to ONNX
+  [`RobertasTa/lt-ausys`](https://huggingface.co/RobertasTa/lt-ausys): Datolabs'
+  Upelis (`datolabs/upelis-0.6b-lt-v1`, a Nemotron 0.6B RNN-T fine-tuned on
+  LIEPA-3 and Common Voice, OpenMDW-1.1) exported to ONNX with the Lithuanian
+  language prompt built in
   - Measured on one Ryzen 7 8845HS (4 threads, greedy, no VAD) against the
     Lithuanian Whisper fine-tune Paprika (CTranslate2 int8, the files this
-    server runs): FLEURS lt WER **10.58 %** vs 11.97 %, **0.21 s** vs 3.55 s
-    per 2–6 s voice command, 0.35 s vs 3.90 s per FLEURS sentence. Whisper
-    pays a fixed 30-second window per utterance; a transducer processes only
-    the audio it is given
+    server runs): FLEURS lt WER **8.32 %** vs 11.97 %, **0.18 s** vs 3.55 s
+    per 2–6 s voice command. Whisper pays a fixed 30-second window per
+    utterance; a transducer processes only the audio it is given
   - On a CPU the int8 files are loaded (MatMul-only quantization: the same
-    accuracy as fp32 on a 119-command intent exam, 0.9 GB instead of 2.5 GB);
+    accuracy as fp32 on a 119-command intent exam, 0.7 GB instead of 2.5 GB);
     a GPU keeps fp32, as the sherpa backend does
   - Without the `onnx-asr` extra nothing changes: `lt` keeps falling back to
     faster-whisper. `--stt-library onnx-asr` now reports `lt` as well as `ru`

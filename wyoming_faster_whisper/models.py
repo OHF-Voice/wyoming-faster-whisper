@@ -309,7 +309,7 @@ class ModelLoader:
 
             # LT_ausys ships int8 files (MatMul-only quantization): on a CPU the
             # same accuracy as fp32 on a 119-command intent exam, 1.7x faster and
-            # 0.9 GB instead of 2.5 GB. A GPU keeps fp32, as the sherpa backend
+            # 0.7 GB instead of 2.5 GB. A GPU keeps fp32, as the sherpa backend
             # does with its int8 preference.
             quantization = None
             if (model == LT_AUSYS_MODEL) and not is_gpu(self.device):
@@ -504,8 +504,8 @@ def guess_stt_library(
                 return SttLibrary.ONNX_ASR
 
             if (base == "lt") and has_onnx_asr:
-                # Prefer LT_ausys (Parakeet-TDT, Lithuanian) via onnx-asr: on a
-                # CPU ~17x faster per command than the Lithuanian Whisper
+                # Prefer LT_ausys (a Lithuanian transducer) via onnx-asr: on a
+                # CPU ~19x faster per command than the Lithuanian Whisper
                 # fine-tune, and more accurate. Numbers in guess_model.
                 return SttLibrary.ONNX_ASR
 
@@ -597,14 +597,15 @@ def guess_model(
 
     if stt_library == SttLibrary.ONNX_ASR:
         if base == "lt":
-            # LT_ausys: kristijonas/kmynas-parakeet-lt-v4 (Parakeet-TDT 0.6B v3
-            # fine-tuned on 3,087 h of LIEPA-3, CC BY 4.0) exported to ONNX for
-            # onnx-asr. Measured on one Ryzen 7 8845HS, 4 threads, greedy, no
-            # VAD, against the same CTranslate2 int8 files this server runs for
-            # the Lithuanian Whisper fine-tune (kristijonas/paprika-whisper-lt-v3):
+            # LT_ausys: datolabs/upelis-0.6b-lt-v1 (Nemotron unified ASR 0.6B,
+            # RNN-T, fine-tuned on LIEPA-3 and Common Voice, OpenMDW-1.1) exported
+            # to ONNX for onnx-asr, the Lithuanian prompt built into the encoder.
+            # Measured on one Ryzen 7 8845HS, 4 threads, greedy, no VAD, against
+            # the same CTranslate2 int8 files this server runs for the
+            # Lithuanian Whisper fine-tune (kristijonas/paprika-whisper-lt-v3):
             #
             #                     FLEURS lt WER  per 2-6 s command  peak RSS*
-            #   LT_ausys int8         10.58 %         0.21 s        1.6 / 2.0 GiB
+            #   LT_ausys int8          8.32 %         0.18 s        1.4 / 1.4 GiB
             #   Paprika CT2 int8      11.97 %         3.55 s        1.2 / 1.2 GiB
             #   * while transcribing the commands / the FLEURS sentences
             #
