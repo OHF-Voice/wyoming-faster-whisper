@@ -754,6 +754,48 @@ def test_no_intermediate_passes_after_speech_ends() -> None:
     assert model.calls == [(800, [])]
 
 
+def test_each_new_partial_is_reported_once() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model)
+    assert session.streams_partials
+    assert session.poll_partial() is None
+
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.poll_partial() == "16 tokens"
+    assert session.poll_partial() is None
+
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.poll_partial() == "32 tokens"
+
+
+def test_an_unchanged_pass_reports_no_partial() -> None:
+    model = _FakeStreamingModel()
+    clipper = _SpanClipper()
+    session = _session(model, chunk_seconds=10, clipper=clipper)
+    session.accept_chunk(_silence(0.1))
+
+    # Two speech-end passes over spans of the same length give the same tokens.
+    clipper.settled = (0, 1600)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.poll_partial() == "8 tokens"
+
+    clipper.settled = (1600, 3200)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.poll_partial() is None
+
+
+def test_a_failed_pass_reports_no_partial() -> None:
+    model = _FakeStreamingModel(fail_passes=1)
+    session = _session(model)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.poll_partial() is None
+
+
 def test_a_pass_that_heard_everything_is_reused() -> None:
     model = _FakeStreamingModel()
     session = _session(model)

@@ -22,7 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "wyoming>=1.10.2,<2",
+    # 1.11.0 defines transcript-chunk as the whole transcript so far
+    "wyoming>=1.11.0,<2",
     "faster-whisper>=1.2.1,<2",
     # faster-whisper 1.2.1 passes metadata_errors to av.open(), which PyAV 19 removed
     "av>=11,<19",

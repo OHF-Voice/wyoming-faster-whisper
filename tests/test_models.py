@@ -432,6 +432,24 @@ def test_each_streaming_flag_applies_only_to_its_backend() -> None:
     assert not qwen3.is_streaming(SttLibrary.FASTER_WHISPER)
 
 
+@pytest.mark.parametrize(
+    ("stt_library", "flags", "expected"),
+    [
+        (SttLibrary.QWEN3_ASR, {"qwen3_asr_streaming": True}, True),
+        (SttLibrary.QWEN3_ASR, {}, False),
+        # sherpa streams audio in, but has no in-progress transcripts to send.
+        (SttLibrary.SHERPA, {"sherpa_streaming": True}, False),
+        (SttLibrary.FASTER_WHISPER, {"qwen3_asr_streaming": True}, False),
+    ],
+)
+def test_partial_transcripts_follow_the_backend_in_use(
+    stt_library, flags, expected
+) -> None:
+    loader = _loader(**flags)
+    loader.resolve_stt_library = lambda language=None: stt_library  # type: ignore
+    assert loader.streams_partial_transcripts() is expected
+
+
 @pytest.mark.asyncio
 async def test_qwen3_streaming_reaches_the_builder() -> None:
     loader = _loader(qwen3_asr_streaming=True)

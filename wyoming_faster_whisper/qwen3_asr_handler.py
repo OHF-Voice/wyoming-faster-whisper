@@ -792,6 +792,18 @@ class Qwen3AsrStreamingSession(StreamingSession):
         self._run_options: Optional[ort.RunOptions] = None
         # --vad-clip: the clipped span the last speech-end pass was started on.
         self._speech_end: Optional[Tuple[int, int]] = None
+        # The newest pass's transcript, until poll_partial() hands it out.
+        self._partial: Optional[str] = None
+
+    @property
+    def streams_partials(self) -> bool:
+        return True
+
+    def poll_partial(self) -> Optional[str]:
+        with self._lock:
+            partial, self._partial = self._partial, None
+
+        return partial
 
     def accept_chunk(self, audio_bytes: bytes) -> None:
         audio_bytes = self._leftover + audio_bytes
@@ -876,14 +888,18 @@ class Qwen3AsrStreamingSession(StreamingSession):
                 _LOGGER.exception("Intermediate Qwen3-ASR pass failed")
             return
 
+        text = self.model.tokens_to_text(tokens)
         with self._lock:
+            changed = tokens != self._result[1]
             self._result = (audio_bytes, tokens)
+            if changed and text:
+                self._partial = text
 
         _LOGGER.debug(
             "%s transcript (%.2fs): %s",
             "Speech-end" if final else "Partial",
             len(audio_bytes) / (2 * _RATE),
-            self.model.tokens_to_text(tokens),
+            text,
         )
 
     def finish(self) -> str:

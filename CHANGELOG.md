@@ -26,6 +26,11 @@
     transcript ready by then (0.31 s → 0 s after audio-stop with 0.8 s of
     trailing silence). If the speaker carries on, the result becomes the next
     pass's draft
+  - Each pass's transcript is streamed to the client as it completes
+    (`transcript-start`, `transcript-chunk`, then `transcript` and
+    `transcript-stop`), and `supports_transcript_streaming` is advertised. A
+    chunk is the whole transcript so far, as wyoming 1.11.0 defines it, so the
+    minimum wyoming version is now 1.11.0
 
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are

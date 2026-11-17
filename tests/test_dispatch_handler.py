@@ -16,7 +16,13 @@ import pytest
 pytest.importorskip("aiohttp")
 
 # pylint: disable=wrong-import-position
-from wyoming.asr import Transcribe, Transcript  # noqa: E402
+from wyoming.asr import (  # noqa: E402
+    Transcribe,
+    Transcript,
+    TranscriptChunk,
+    TranscriptStart,
+    TranscriptStop,
+)
 from wyoming.audio import AudioChunk, AudioStart, AudioStop  # noqa: E402
 from wyoming.info import Info  # noqa: E402
 
@@ -48,6 +54,37 @@ class FakeSession(StreamingSession):
         return "streamed transcript"
 
 
+class PartialSession(FakeSession):
+    """Reports one scripted partial (or None) per chunk, then a final text."""
+
+    def __init__(
+        self,
+        initial_prompt: Optional[str],
+        partials: List[Optional[str]],
+        final: str = "turn on the lamp",
+    ) -> None:
+        super().__init__(initial_prompt)
+        self.partials = list(partials)
+        self.final = final
+        self._ready: Optional[str] = None
+
+    @property
+    def streams_partials(self) -> bool:
+        return True
+
+    def accept_chunk(self, audio_bytes: bytes) -> None:
+        super().accept_chunk(audio_bytes)
+        if self.partials:
+            self._ready = self.partials.pop(0)
+
+    def poll_partial(self) -> Optional[str]:
+        partial, self._ready = self._ready, None
+        return partial
+
+    def finish(self) -> str:
+        return self.final
+
+
 class FakeTranscriber(Transcriber):
     """Captures every call, and can pretend to have (or lack) a tokenizer."""
 
@@ -55,11 +92,14 @@ class FakeTranscriber(Transcriber):
         self,
         streaming: bool = False,
         tokens_per_word: Optional[int] = None,
+        partials: Optional[List[Optional[str]]] = None,
     ) -> None:
         self.calls: List[Dict[str, Any]] = []
         self.sessions: List[FakeSession] = []
         self._streaming = streaming
         self._tokens_per_word = tokens_per_word
+        # Scripted partials make every session stream them.
+        self._partials = partials
 
     def transcribe(
         self,
@@ -95,7 +135,11 @@ class FakeTranscriber(Transcriber):
         beam_size: int = 5,
         initial_prompt: Optional[str] = None,
     ) -> StreamingSession:
-        session = FakeSession(initial_prompt)
+        session = (
+            FakeSession(initial_prompt)
+            if self._partials is None
+            else PartialSession(initial_prompt, self._partials)
+        )
         self.sessions.append(session)
         return session
 
@@ -462,6 +506,122 @@ async def test_a_streaming_session_does_not_wait_for_a_slow_fetch():
 
     assert transcriber.sessions[0].initial_prompt == "Vocabulary:"
     assert elapsed < 1.0, f"streaming start blocked for {elapsed:.1f}s"
+
+
+# --- transcript streaming ------------------------------------------------
+
+
+def _streamed(handler: Handler) -> List[Any]:
+    """The written events as (type, text) pairs, Info and the like left out."""
+    pairs = []
+    for event in handler.written:
+        if TranscriptStart.is_type(event.type):
+            pairs.append(("start", None))
+        elif TranscriptChunk.is_type(event.type):
+            pairs.append(("chunk", TranscriptChunk.from_event(event).text))
+        elif Transcript.is_type(event.type):
+            pairs.append(("transcript", Transcript.from_event(event).text))
+        elif TranscriptStop.is_type(event.type):
+            pairs.append(("stop", None))
+
+    return pairs
+
+
+async def test_partials_stream_as_chunks_around_the_transcript():
+    transcriber = FakeTranscriber(
+        streaming=True, partials=[None, "turn on", "turn on the lamb"]
+    )
+    handler = _handler(transcriber)
+    await _utterance(handler)
+
+    assert _streamed(handler) == [
+        ("start", None),
+        ("chunk", "turn on"),
+        # Each chunk is the whole transcript so far, revisions included...
+        ("chunk", "turn on the lamb"),
+        # ...and the last one is the final text, for chunk-only clients.
+        ("chunk", "turn on the lamp"),
+        # Transcript still comes for clients that know nothing else.
+        ("transcript", "turn on the lamp"),
+        ("stop", None),
+    ]
+
+
+async def test_start_carries_the_language():
+    handler = _handler(FakeTranscriber(streaming=True, partials=["turn on"]))
+    await _utterance(handler)
+    start = next(e for e in handler.written if TranscriptStart.is_type(e.type))
+    assert TranscriptStart.from_event(start).language == "en"
+
+
+async def test_a_repeated_partial_is_not_sent_again():
+    transcriber = FakeTranscriber(
+        streaming=True, partials=["turn on the lamp", "turn on the lamp"]
+    )
+    handler = _handler(transcriber)
+    await _utterance(handler)
+
+    # Nor is the final text, which matches the last chunk already sent.
+    assert _streamed(handler) == [
+        ("start", None),
+        ("chunk", "turn on the lamp"),
+        ("transcript", "turn on the lamp"),
+        ("stop", None),
+    ]
+
+
+async def test_a_stream_with_no_partials_still_streams_the_final_text():
+    # A command shorter than one pass: the events are complete regardless.
+    handler = _handler(FakeTranscriber(streaming=True, partials=[]))
+    await _utterance(handler)
+    assert _streamed(handler) == [
+        ("start", None),
+        ("chunk", "turn on the lamp"),
+        ("transcript", "turn on the lamp"),
+        ("stop", None),
+    ]
+
+
+async def test_sessions_without_partials_send_only_the_transcript():
+    handler = _handler(FakeTranscriber(streaming=True))
+    await _utterance(handler)
+    assert _streamed(handler) == [("transcript", "streamed transcript")]
+
+
+async def test_batch_sends_only_the_transcript():
+    handler = _handler(FakeTranscriber())
+    await _utterance(handler)
+    assert _streamed(handler) == [("transcript", "fake transcript")]
+
+
+async def test_each_utterance_streams_from_the_start():
+    transcriber = FakeTranscriber(streaming=True, partials=["turn on"])
+    handler = _handler(transcriber)
+    await _utterance(handler)
+    first = _streamed(handler)
+    handler.written.clear()
+
+    await _utterance(handler)
+    assert _streamed(handler) == first
+
+
+async def test_a_client_gone_before_transcript_stop_is_not_an_error():
+    class HangsUpAfterTranscript(Handler):
+        async def write_event(self, event) -> None:
+            if TranscriptStop.is_type(event.type):
+                raise ConnectionResetError("client went away")
+
+            await super().write_event(event)
+
+    handler = HangsUpAfterTranscript(
+        Info(),
+        FakeLoader(FakeTranscriber(streaming=True, partials=["turn on"])),
+        None,
+        None,
+        None,
+    )
+    await _utterance(handler)
+    assert handler.transcript == "turn on the lamp"
 
 
 # --- --vad-clip library selection -----------------------------------------

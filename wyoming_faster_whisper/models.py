@@ -194,6 +194,15 @@ class ModelLoader:
 
         return False
 
+    def streams_partial_transcripts(self, language: Optional[str] = None) -> bool:
+        """Report whether in-progress transcripts are sent as audio arrives.
+
+        Only qwen3-asr's streaming sessions produce them: its passes re-decode
+        everything so far, which is exactly what a transcript-chunk carries.
+        """
+        stt_library = self.resolve_stt_library(language)
+        return (stt_library == SttLibrary.QWEN3_ASR) and self.is_streaming(stt_library)
+
     def should_vad_clip(self, language: Optional[str] = None) -> bool:
         """Report whether leading/trailing silence should be clipped."""
         return vad_clip_enabled(

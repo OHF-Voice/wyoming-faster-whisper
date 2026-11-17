@@ -8,7 +8,13 @@ import time
 import wave
 from typing import TYPE_CHECKING, List, Optional
 
-from wyoming.asr import Transcribe, Transcript
+from wyoming.asr import (
+    Transcribe,
+    Transcript,
+    TranscriptChunk,
+    TranscriptStart,
+    TranscriptStop,
+)
 from wyoming.audio import AudioChunk, AudioChunkConverter, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Describe, Info
@@ -73,6 +79,11 @@ class DispatchEventHandler(AsyncEventHandler):
         # Whether this utterance already asked for a name refresh.
         self._refreshed_names = False
 
+        # Transcript streaming: whether transcript-start has gone out for this
+        # utterance, and the text of the last transcript-chunk.
+        self._transcript_started = False
+        self._last_chunk: Optional[str] = None
+
     async def handle_event(self, event: Event) -> bool:
         if AudioStart.is_type(event.type):
             self._finished = False
@@ -113,6 +124,7 @@ class DispatchEventHandler(AsyncEventHandler):
             if self._is_streaming:
                 assert self._session is not None
                 await asyncio.to_thread(self._session.accept_chunk, chunk.audio)
+                await self._send_partial()
             elif self._is_streaming is False:
                 self._ensure_wav_file()
                 assert self._wav_file is not None
@@ -225,8 +237,47 @@ class DispatchEventHandler(AsyncEventHandler):
         end_time = time.monotonic()
         _LOGGER.info(text)
 
+        streamed = (self._session is not None) and self._session.streams_partials
+        if streamed:
+            # End the chunks on the final text, for clients that only show
+            # chunks; Transcript follows for those that know nothing else.
+            await self._start_transcript()
+            if text != self._last_chunk:
+                await self._write_chunk(text)
+
         await self.write_event(Transcript(text=text).event())
         _LOGGER.debug("Completed request in %s second(s)", end_time - start_time)
+
+        if streamed:
+            try:
+                await self.write_event(TranscriptStop().event())
+            except ConnectionError:
+                # Clients that predate transcript streaming (Home Assistant's
+                # among them) hang up as soon as they have the Transcript.
+                _LOGGER.debug("Client closed before transcript-stop")
+
+    async def _send_partial(self) -> None:
+        """Send the streaming session's newest in-progress transcript, if any."""
+        assert self._session is not None
+        if not self._session.streams_partials:
+            return
+
+        text = self._session.poll_partial()
+        if (not text) or (text == self._last_chunk):
+            return
+
+        await self._start_transcript()
+        await self._write_chunk(text)
+
+    async def _start_transcript(self) -> None:
+        if not self._transcript_started:
+            self._transcript_started = True
+            await self.write_event(TranscriptStart(language=self._language).event())
+
+    async def _write_chunk(self, text: str) -> None:
+        self._last_chunk = text
+        _LOGGER.debug("Transcript so far: %s", text)
+        await self.write_event(TranscriptChunk(text=text).event())
 
     def _reset_endpoint_detector(self) -> None:
         """Create or reset endpointing for a new normalized audio stream."""
@@ -290,6 +341,7 @@ class DispatchEventHandler(AsyncEventHandler):
                 replay = b"".join(self._pending_audio)
                 self._pending_audio.clear()
                 await asyncio.to_thread(self._session.accept_chunk, replay)
+                await self._send_partial()
         else:
             # Batch path: flush buffered audio to the WAV file.
             self._ensure_wav_file()
@@ -322,3 +374,5 @@ class DispatchEventHandler(AsyncEventHandler):
         self._session = None
         self._pending_audio = []
         self._refreshed_names = False
+        self._transcript_started = False
+        self._last_chunk = None

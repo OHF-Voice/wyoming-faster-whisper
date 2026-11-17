@@ -55,3 +55,12 @@ def test_server_vad_disables_home_assistant_endpointing() -> None:
         .asr[0]
         .requires_external_vad
     )
+
+
+def test_transcript_streaming_is_advertised_only_when_asked() -> None:
+    assert not build_info("model", ["en"]).asr[0].supports_transcript_streaming
+    assert (
+        build_info("model", ["en"], supports_transcript_streaming=True)
+        .asr[0]
+        .supports_transcript_streaming
+    )

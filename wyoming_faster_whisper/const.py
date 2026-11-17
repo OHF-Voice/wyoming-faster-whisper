@@ -274,3 +274,21 @@ class StreamingSession(ABC):
     @abstractmethod
     def finish(self) -> str:
         """Finish the stream and return the final transcript."""
+
+    @property
+    def streams_partials(self) -> bool:
+        """True if poll_partial() reports in-progress transcripts.
+
+        The server then answers with Wyoming's transcript streaming events
+        (transcript-start, transcript-chunk, transcript-stop) around the final
+        transcript.
+        """
+        return False
+
+    def poll_partial(self) -> Optional[str]:
+        """The transcript so far, if it changed since the last call; else None.
+
+        Each one replaces the previous, so it may revise earlier words. Must not
+        block: it is called after every audio chunk.
+        """
+        return None

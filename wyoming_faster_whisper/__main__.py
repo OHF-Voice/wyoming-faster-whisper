@@ -178,7 +178,8 @@ def get_parser() -> argparse.ArgumentParser:
         help="Transcribe while audio arrives: decode again every 2 seconds, "
         "checking the previous pass's transcript as a draft, which cuts latency "
         "after the audio stops at the cost of CPU while the speaker is talking; "
-        "with --vad-clip, the final pass starts as soon as the speaker stops "
+        "with --vad-clip, the final pass starts as soon as the speaker stops. "
+        "Each pass's transcript is streamed to the client as a transcript-chunk "
         "(qwen3-asr only)",
     )
     parser.add_argument(
@@ -319,6 +320,7 @@ async def main() -> None:
         model_name,
         languages,
         requires_external_vad=args.vad_endpointing is None,
+        supports_transcript_streaming=loader.streams_partial_transcripts(),
     )
     _LOGGER.debug("Reporting %s language(s)", len(languages))
 
@@ -360,6 +362,7 @@ def build_info(
     languages: List[str],
     *,
     requires_external_vad: bool = True,
+    supports_transcript_streaming: bool = False,
 ) -> Info:
     """Build Wyoming service metadata.
 
@@ -381,6 +384,7 @@ def build_info(
                 installed=True,
                 version=__version__,
                 requires_external_vad=requires_external_vad,
+                supports_transcript_streaming=supports_transcript_streaming,
                 models=[
                     AsrModel(
                         name=model_name,

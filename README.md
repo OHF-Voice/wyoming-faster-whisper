@@ -256,6 +256,16 @@ audio-stop (from 0.31s on average with clipping alone); with none added, the
 mean was 35 ms. If the speaker carries on after a pause, the early result just
 becomes the draft for the next pass.
 
+Each pass's transcript is also sent to the client as it completes, using Wyoming's
+transcript streaming events (and the server advertises
+`supports_transcript_streaming`). `transcript-start` comes before the first one.
+Each `transcript-chunk` carries the whole transcript so far, so it may revise
+earlier words: "the incubator" became "the Igobi" once the speaker had finished
+saying "Ecobee". After audio-stop, a last chunk carries the final text if it
+differs, then the usual `transcript` for clients that know nothing else, then
+`transcript-stop`. Clients that don't handle these events, including Home
+Assistant's Wyoming integration today, just wait for the `transcript`.
+
 ## Docker Image
 
 ``` sh
