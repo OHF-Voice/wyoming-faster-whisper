@@ -82,6 +82,19 @@
   but every refresh failed with a bare `unauthorized`. The README now says the
   token must belong to an administrator
 
+- Dependency updates: `transformers` 4.52.4 → 5.23.0, `onnx-asr` 0.11.0 →
+  0.12.0, `sherpa-onnx` may now be 2.x, and the Docker images' `torch` 2.6.0 →
+  2.15.0 (CPU) and 2.14.1 (GPU, the last CUDA 12 build). Through
+  `huggingface-hub` 2.x, which `transformers` 5 allows, startup with a cached
+  Hugging Face model is faster: about 0.7 s for faster-whisper. The
+  `transformers` backend also loads about 0.6 s faster and uses about 130 MB
+  less memory, but transcribes short commands about 2% slower. Other backends
+  are unchanged in speed
+
+- The `funasr` extra installs FunASR's `knf` feature-extraction backend. FunASR
+  1.4.27, which the extra resolves to, no longer brings one itself, and failed
+  every transcription without torchaudio or kaldi-native-fbank
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an
