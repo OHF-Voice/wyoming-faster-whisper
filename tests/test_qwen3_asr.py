@@ -6,6 +6,8 @@ onnxruntime is not installed (the handler imports it at module scope).
 """
 
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -263,3 +265,228 @@ def test_log_mel_frame_count_and_range() -> None:
     assert mel.dtype == np.float32
     # The log scale is clamped to an 8-decade window then rescaled.
     assert mel.max() - mel.min() <= 2.0 + 1e-6
+
+
+# --- forced prefix ---------------------------------------------------------
+
+
+class _PrefillRecorder:
+    """Enough of a transcriber for decode_tokens: records the prompt prefilled."""
+
+    def __init__(self, generated) -> None:
+        self.generated = list(generated)
+        self.prompts: list = []
+        self._mel_filters = _mel_filterbank()
+        self._encoder_inputs = ["mel"]
+        self._encoder = SimpleNamespace(
+            run=lambda names, inputs, run_options=None: [np.zeros((1, 2, 4), dtype=np.float32)]
+        )
+        self._merged = object()
+
+    def _context_ids(self, initial_prompt, language):
+        return [1111], [3333, qwen3_asr_handler._ASR_TEXT]
+
+    def _build_prompt_ids(self, n_audio_tokens, context_ids, language_ids):
+        return _build_prompt_ids(None, n_audio_tokens, context_ids, language_ids)
+
+    def _generate_merged(self, audio_features, prompt_ids, n_system, run_options):
+        self.prompts.append(prompt_ids)
+        return list(self.generated)
+
+
+decode_tokens = qwen3_asr_handler.Qwen3AsrTranscriber.decode_tokens
+
+
+def test_forced_prefix_follows_the_language_suffix() -> None:
+    model = _PrefillRecorder([7, 8, 151645])
+    audio = np.zeros(1600, dtype=np.float32)
+    tokens = decode_tokens(model, audio, "en", None, prefix=[5, 6])
+
+    prompt = model.prompts[0]
+    assert prompt[-4:] == [3333, qwen3_asr_handler._ASR_TEXT, 5, 6]
+    # The prefix is part of the result, ahead of what was generated after it.
+    assert tokens == [5, 6, 7, 8, 151645]
+
+
+def test_no_prefix_leaves_the_prompt_unchanged() -> None:
+    model = _PrefillRecorder([7, 151645])
+    audio = np.zeros(1600, dtype=np.float32)
+    assert decode_tokens(model, audio, "en", None) == [7, 151645]
+    assert model.prompts[0][-1] == qwen3_asr_handler._ASR_TEXT
+
+
+# --- streaming session -----------------------------------------------------
+
+
+_RATE = qwen3_asr_handler._RATE
+_UNFIXED_CHUNKS = qwen3_asr_handler._UNFIXED_CHUNKS
+_UNFIXED_TOKENS = qwen3_asr_handler._UNFIXED_TOKENS
+
+
+class _FakeStreamingModel:
+    """Records every decode; each returns one token per 100 samples."""
+
+    def __init__(self, fail_passes: int = 0) -> None:
+        self.calls: list = []
+        self.gate = threading.Event()
+        self.gate.set()
+        self.fail_passes = fail_passes
+        self.aborted = 0
+
+    def decode_tokens(
+        self, audio, language, initial_prompt, prefix=(), run_options=None
+    ):
+        # Background passes (the ones with run_options) block like a long model
+        # run until the gate opens, and terminate aborts them as ORT would.
+        while (run_options is not None) and not self.gate.wait(timeout=0.01):
+            if run_options.terminate:
+                self.aborted += 1
+                raise RuntimeError("Exiting due to terminate flag being set to true.")
+
+        self.calls.append((len(audio), list(prefix)))
+        if self.fail_passes:
+            self.fail_passes -= 1
+            raise RuntimeError("boom")
+
+        return list(range(len(audio) // 100))
+
+    def tokens_to_text(self, tokens):
+        return f"{len(tokens)} tokens"
+
+
+def _session(model, chunk_seconds: float = 0.1):
+    return qwen3_asr_handler.Qwen3AsrStreamingSession(
+        model, "en", None, chunk_seconds=chunk_seconds
+    )
+
+
+def _silence(seconds: float) -> bytes:
+    return bytes(int(seconds * _RATE) * 2)
+
+
+def _drain(session) -> None:
+    if session._worker is not None:
+        session._worker.join(timeout=5)
+
+
+def test_no_pass_before_a_chunk_of_audio() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model, chunk_seconds=1.0)
+    session.accept_chunk(_silence(0.5))
+    _drain(session)
+    assert not model.calls
+
+    # Short commands get exactly one decode, the same as the batch path.
+    assert session.finish() == "80 tokens"
+    assert model.calls == [(8000, [])]
+
+
+def test_a_pass_runs_once_a_chunk_has_arrived() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert model.calls == [(1600, [])]
+
+
+def test_passes_do_not_queue_behind_a_running_one() -> None:
+    model = _FakeStreamingModel()
+    model.gate.clear()
+    session = _session(model)
+
+    for _ in range(5):
+        session.accept_chunk(_silence(0.1))
+
+    model.gate.set()
+    _drain(session)
+    # Only the first pass ran; the rest arrived while it was busy.
+    assert len(model.calls) == 1
+
+    # The next chunk catches up on everything buffered meanwhile.
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert model.calls[-1][0] == 6 * 1600
+
+
+def test_prefix_is_withheld_for_the_first_passes_then_rolled_back() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model)
+    for _ in range(_UNFIXED_CHUNKS + 1):
+        session.accept_chunk(_silence(0.1))
+        _drain(session)
+
+    prefixes = [prefix for _, prefix in model.calls]
+    assert prefixes[:_UNFIXED_CHUNKS] == [[]] * _UNFIXED_CHUNKS
+    # The previous result had 32 tokens; the last few are not forced.
+    previous = list(range((_UNFIXED_CHUNKS * 1600) // 100))
+    assert prefixes[_UNFIXED_CHUNKS] == previous[:-_UNFIXED_TOKENS]
+
+
+def test_finish_aborts_a_running_pass_and_decodes_all_audio() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model)
+    for _ in range(_UNFIXED_CHUNKS):
+        session.accept_chunk(_silence(0.1))
+        _drain(session)
+
+    # This pass is still running when the audio stops.
+    model.gate.clear()
+    session.accept_chunk(_silence(0.1))
+    session.accept_chunk(_silence(0.05))
+
+    started = time.monotonic()
+    text = session.finish()
+    assert time.monotonic() - started < 1.0
+    assert model.aborted == 1
+    assert text == "56 tokens"
+
+    # The final pass read everything and used the last *finished* pass's result.
+    length, prefix = model.calls[-1]
+    assert length == 5600
+    assert prefix == list(range(32))[:-_UNFIXED_TOKENS]
+
+
+def test_odd_byte_chunks_are_reassembled() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model, chunk_seconds=10)
+    audio = _silence(0.1)
+    session.accept_chunk(audio[:1001])
+    session.accept_chunk(audio[1001:])
+    session.finish()
+    assert model.calls == [(1600, [])]
+
+
+def test_trailing_odd_byte_is_padded_into_a_sample() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model, chunk_seconds=10)
+    session.accept_chunk(b"\x00" * 201)
+    session.finish()
+    assert model.calls == [(101, [])]
+
+
+def test_a_failed_pass_only_loses_the_hint() -> None:
+    model = _FakeStreamingModel(fail_passes=1)
+    session = _session(model)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session._passes == 0
+
+    assert session.finish() == "16 tokens"
+
+
+def test_finish_with_no_audio_is_empty() -> None:
+    model = _FakeStreamingModel()
+    assert _session(model).finish() == ""
+    assert not model.calls
+
+
+def test_streaming_transcriber_starts_streaming_sessions(
+    tmp_path, stub_runtime
+) -> None:
+    model = qwen3_asr_handler.Qwen3AsrStreamingTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path)
+    )
+    assert model.supports_streaming
+    session = model.start_stream("en", initial_prompt="Vocabulary: Ecobee.")
+    assert isinstance(session, qwen3_asr_handler.Qwen3AsrStreamingSession)
+    assert session.initial_prompt == "Vocabulary: Ecobee."

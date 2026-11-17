@@ -61,6 +61,7 @@ class ModelLoader:
         vad_parameters: Optional[Dict[str, Any]],
         whisper_task: Optional[str] = None,
         sherpa_streaming: bool = False,
+        qwen3_asr_streaming: bool = False,
         vad_clip: bool = False,
         vad_clip_threshold: float = 0.5,
         vad_clip_pad_ms: int = 400,
@@ -69,6 +70,7 @@ class ModelLoader:
         self.preferred_stt_library = preferred_stt_library
         self.preferred_language = preferred_language
         self.sherpa_streaming = sherpa_streaming
+        self.qwen3_asr_streaming = qwen3_asr_streaming
 
         self.download_dir = Path(download_dir)
         self.local_files_only = local_files_only
@@ -176,11 +178,21 @@ class ModelLoader:
         languages: Set[str] = set()
         for language in ALL_LANGUAGES:
             stt_library = self.resolve_stt_library(language)
-            streaming = self.sherpa_streaming and (stt_library == SttLibrary.SHERPA)
+            streaming = self.is_streaming(stt_library)
             if language in library_languages(stt_library, streaming=streaming):
                 languages.add(language)
 
         return languages
+
+    def is_streaming(self, stt_library: SttLibrary) -> bool:
+        """Report whether a backend was asked to transcribe while audio arrives."""
+        if stt_library == SttLibrary.SHERPA:
+            return self.sherpa_streaming
+
+        if stt_library == SttLibrary.QWEN3_ASR:
+            return self.qwen3_asr_streaming
+
+        return False
 
     def should_vad_clip(self, language: Optional[str] = None) -> bool:
         """Report whether leading/trailing silence should be clipped."""
@@ -195,8 +207,7 @@ class ModelLoader:
         language = language or self.preferred_language
         stt_library = self.resolve_stt_library(language)
 
-        # Streaming is only supported by the sherpa backend.
-        streaming = self.sherpa_streaming and (stt_library == SttLibrary.SHERPA)
+        streaming = self.is_streaming(stt_library)
 
         # Select model
         model = self.model
@@ -323,6 +334,19 @@ class ModelLoader:
             )
 
         if stt_library == SttLibrary.QWEN3_ASR:
+            if streaming:
+                from .qwen3_asr_handler import (  # noqa: F811
+                    Qwen3AsrStreamingTranscriber,
+                )
+
+                return Qwen3AsrStreamingTranscriber(
+                    model,
+                    cache_dir=self.download_dir,
+                    local_files_only=local_files_only,
+                    cpu_threads=self.cpu_threads,
+                    device=self.device,
+                )
+
             from .qwen3_asr_handler import Qwen3AsrTranscriber  # noqa: F811
 
             return Qwen3AsrTranscriber(

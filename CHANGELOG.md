@@ -2,6 +2,15 @@
 
 ## 3.9.0
 
+- Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
+  still arriving, following the official Qwen3-ASR streaming recipe: all audio so
+  far is decoded again every 2 seconds, and each pass's result (minus its last 5
+  tokens) is forced into the next, so after audio-stop only the tail is left to
+  generate. Intermediate passes run in the background and are aborted rather
+  than waited for when the audio stops. Post-stop latency is unchanged for short
+  commands and ~25-35% lower from ~7 seconds of audio up; transcripts matched
+  batch on every clip measured
+
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are
   installed dynamically downstream, so pinning one with `--stt-library` used to

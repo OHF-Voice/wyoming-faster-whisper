@@ -206,6 +206,35 @@ Accuracy is unchanged: on LibriSpeech test-other (n=200) the two produce
 byte-identical transcripts with no prompt (5.35% WER for both), and 5.33% vs
 5.43% with a 50-name prompt.
 
+### Streaming on qwen3-asr
+
+`--qwen3-asr-streaming` makes `qwen3-asr` transcribe while the speaker is still
+talking, so less of the work is left for after the audio stops. Qwen3-ASR is not a
+streaming model — what it hears later can change how it reads what came before —
+so this follows the official Qwen3-ASR recipe: every 2 seconds of new audio it
+decodes everything so far again, and from the third pass on it carries that
+result forward, minus the last 5 tokens, for the next pass to read in one step
+rather than generate word by word. The final pass after the audio stops still
+reads all of it, so the transcript is the model's full-context answer, not a
+stitched-together one.
+
+The trade is CPU while the speaker talks for latency once they stop, and it only
+pays off on longer audio: a short command gets one or two passes, too few to
+carry anything forward, and finishes in the same time as without the flag.
+Measured on a desktop CPU (4 threads, English, no prompt), time from audio-stop
+to transcript:
+
+| Audio | batch | `--qwen3-asr-streaming` |
+| --- | --- | --- |
+| 3.5s | 0.46s | 0.46s |
+| 6.9s | 0.80s | 0.61s |
+| 10.0s | 1.24s | 0.95s |
+| 17.4s | 2.44s | 1.73s |
+
+Transcripts were identical to batch in every case measured, but as the prefix is
+taken on trust, a mistake in it can survive into the final pass. `--vad-clip` does
+not apply in streaming mode.
+
 ## Docker Image
 
 ``` sh
