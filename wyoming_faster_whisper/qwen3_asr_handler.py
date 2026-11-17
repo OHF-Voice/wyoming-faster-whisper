@@ -96,7 +96,8 @@ _ALLOW_PATTERNS = [
 _MERGED_DECODER = "decoder_merged.int4.onnx"
 
 # Additive attention mask: 0 where attending is allowed, this where it is not.
-_MASK_BLOCKED = np.finfo(np.float32).min
+# pylint cannot see finfo's attributes: numpy (2.5 here) ships no Python source for it.
+_MASK_BLOCKED = np.finfo(np.float32).min  # pylint: disable=no-member
 
 
 def _mel_filterbank() -> np.ndarray:
