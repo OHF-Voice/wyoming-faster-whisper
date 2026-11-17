@@ -251,6 +251,17 @@ of trailing silence added — about what Home Assistant's own VAD waits for befo
 it ends a command. As with batch clipping, the transcript can change: of seven
 test commands, one came out differently (equally wrong) when clipped.
 
+Clipping also lets the final pass start before the audio stops. Once the speaker
+has been quiet for the clip's trailing pad (`--vad-clip-pad-ms`, 400 ms by
+default), the clipped audio is exactly what the final pass would read unless they
+speak again, so it is decoded straight away, and audio-stop returns that result
+(or waits for it to finish). Home Assistant's own VAD waits for a moment of
+silence before it stops the audio, which is usually long enough. With 0.8s of
+trailing silence, all 17 test commands of 1.9-3.5s had their transcript ready at
+audio-stop (from 0.31s on average with clipping alone); with none added, the
+mean was 35 ms. If the speaker carries on after a pause, the early result just
+becomes the draft for the next pass.
+
 ## Docker Image
 
 ``` sh

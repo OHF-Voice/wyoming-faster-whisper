@@ -104,6 +104,10 @@ _MERGED_DECODER = "decoder_merged.int4.onnx"
 # Streaming (--qwen3-asr-streaming): decode all audio so far again every this
 # many seconds of new audio, checking the previous pass's transcript as a draft.
 _STREAM_CHUNK_SECONDS = 2.0
+# With --vad-clip, the silence after speech that starts the final pass early.
+# The clip's trailing pad (--vad-clip-pad-ms) must have arrived too, so this
+# only matters for short pads: it keeps a brief pause from starting one.
+_SPEECH_END_SILENCE_MS = 300
 
 # Additive attention mask: 0 where attending is allowed, this where it is not.
 # pylint cannot see finfo's attributes: numpy (2.5 here) ships no Python source for it.
@@ -750,6 +754,15 @@ class Qwen3AsrStreamingSession(StreamingSession):
     --vad-endpointing). Passes never queue up behind each other: if one is still
     running when the next is due, the next waits for it to finish, so a slow CPU
     simply gets fewer, larger passes.
+
+    With --vad-clip, the final pass can start before the audio stops. Once the
+    speaker has been quiet for the clip's trailing pad, the clipped audio is
+    exactly what finish() will decode unless they speak again, so it is decoded
+    straight away (taking priority over any intermediate pass), and finish()
+    returns that result, or waits for it if it is still running. The client
+    usually waits a moment of silence of its own before it stops the audio, so
+    the transcript can be ready by then. If the speaker carries on after all,
+    the early result is just the draft for the next pass.
     """
 
     def __init__(
@@ -772,10 +785,14 @@ class Qwen3AsrStreamingSession(StreamingSession):
         self._audio = bytearray()
         self._leftover = b""
         self._decoded_bytes = 0  # audio covered by the last pass started
-        self._tokens: List[int] = []  # result of the last finished pass
+        # The audio and tokens of the last pass to finish.
+        self._result: Tuple[bytes, List[int]] = (b"", [])
         self._lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
+        self._worker_audio = b""  # what the worker is decoding
         self._run_options: Optional[ort.RunOptions] = None
+        # --vad-clip: the clipped span the last speech-end pass was started on.
+        self._speech_end: Optional[Tuple[int, int]] = None
 
     def accept_chunk(self, audio_bytes: bytes) -> None:
         audio_bytes = self._leftover + audio_bytes
@@ -788,6 +805,15 @@ class Qwen3AsrStreamingSession(StreamingSession):
         self._audio.extend(audio_bytes)
         if self.clipper is not None:
             self.clipper.process(audio_bytes)
+            span = self.clipper.settled_span(_SPEECH_END_SILENCE_MS)
+            if span is not None:
+                if span != self._speech_end:
+                    self._speech_end = span
+                    self._abort_worker(wait=False)
+                    self._start_pass(bytes(self._audio[span[0] : span[1]]), True)
+
+                # Nothing new to hear until the speaker carries on.
+                return
 
         if (len(self._audio) - self._decoded_bytes) < self._chunk_bytes:
             return
@@ -796,22 +822,45 @@ class Qwen3AsrStreamingSession(StreamingSession):
             return
 
         self._decoded_bytes = len(self._audio)
+        self._start_pass(bytes(self._audio), False)
+
+    def _start_pass(self, audio_bytes: bytes, final: bool) -> None:
         self._run_options = ort.RunOptions()
+        self._worker_audio = audio_bytes
         self._worker = threading.Thread(
             target=self._run_pass,
-            args=(bytes(self._audio), self._run_options),
+            args=(audio_bytes, self._run_options, final),
             name="qwen3-asr-stream",
             daemon=True,
         )
         self._worker.start()
 
+    def _abort_worker(self, wait: bool) -> None:
+        if self._worker is None:
+            return
+
+        assert self._run_options is not None
+        self._run_options.terminate = True
+        if wait:
+            self._worker.join()
+
+        self._worker = None
+        self._worker_audio = b""
+
     def _draft(self) -> List[int]:
         """The last finished pass's tokens, as a draft for the next one."""
         with self._lock:
-            return list(self._tokens)
+            return list(self._result[1])
 
-    def _run_pass(self, audio_bytes: bytes, run_options: "ort.RunOptions") -> None:
-        """One intermediate pass over all audio so far (background thread)."""
+    def _run_pass(
+        self, audio_bytes: bytes, run_options: "ort.RunOptions", final: bool
+    ) -> None:
+        """One pass on a background thread.
+
+        An intermediate pass reads all audio so far; a ``final`` one, the
+        settled --vad-clip span (only the log tells them apart: finish() reuses
+        any pass that read exactly its audio).
+        """
         try:
             tokens = self.model.decode_tokens(
                 _bytes_to_samples(audio_bytes),
@@ -829,25 +878,16 @@ class Qwen3AsrStreamingSession(StreamingSession):
             return
 
         with self._lock:
-            self._tokens = tokens
+            self._result = (audio_bytes, tokens)
 
         _LOGGER.debug(
-            "Partial transcript (%.2fs): %s",
+            "%s transcript (%.2fs): %s",
+            "Speech-end" if final else "Partial",
             len(audio_bytes) / (2 * _RATE),
             self.model.tokens_to_text(tokens),
         )
 
     def finish(self) -> str:
-        if self._worker is not None:
-            # Abort rather than wait: a pass still running is behind the audio
-            # the final pass is about to read anyway, and waiting for it would
-            # add its remaining time to the latency this is meant to cut. Its
-            # loss costs only the draft it would have improved.
-            assert self._run_options is not None
-            self._run_options.terminate = True
-            self._worker.join()
-            self._worker = None
-
         if self._leftover:
             self._audio.extend(self._leftover + b"\x00")
             self._leftover = b""
@@ -867,6 +907,24 @@ class Qwen3AsrStreamingSession(StreamingSession):
                 audio = clipped
             else:
                 _LOGGER.debug("VAD clip: no speech detected, using full audio")
+
+        if (self._worker is not None) and (self._worker_audio == audio):
+            # A pass on exactly this audio (with --vad-clip, normally the one
+            # started at speech end) is the final pass started early.
+            self._worker.join()
+        else:
+            # Abort rather than wait: a pass still running is behind the audio
+            # the final pass is about to read anyway, and waiting for it would
+            # add its remaining time to the latency this is meant to cut. Its
+            # loss costs only the draft it would have improved.
+            self._abort_worker(wait=True)
+
+        with self._lock:
+            result_audio, result_tokens = self._result
+
+        if result_audio == audio:
+            _LOGGER.debug("Final pass already ran before audio-stop")
+            return self.model.tokens_to_text(result_tokens)
 
         tokens = self.model.decode_tokens(
             _bytes_to_samples(audio),

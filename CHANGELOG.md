@@ -18,6 +18,14 @@
     the speech, which on short commands cuts the time after audio-stop by
     10-17%. The VAD runs as the audio arrives, so clipping costs nothing after
     audio-stop
+  - With `--vad-clip`, the final pass starts when the speaker stops rather than
+    when the audio does: once the silence covers the clip's trailing pad, the
+    clipped audio cannot change unless they speak again, so it is decoded then
+    and audio-stop returns that result. Home Assistant waits for silence of its
+    own before stopping the audio, so short commands usually have their
+    transcript ready by then (0.31 s → 0 s after audio-stop with 0.8 s of
+    trailing silence). If the speaker carries on, the result becomes the next
+    pass's draft
 
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are

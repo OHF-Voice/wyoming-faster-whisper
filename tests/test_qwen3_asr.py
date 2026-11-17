@@ -628,11 +628,19 @@ def test_finish_with_no_audio_is_empty() -> None:
 
 
 class _FakeClipper:
-    """Keeps the middle half of the audio, or finds no speech at all."""
+    """Keeps the middle half of the audio, or finds no speech at all.
+
+    ``settled`` is what settled_span() reports: None (still speaking) unless a
+    test sets it.
+    """
 
     def __init__(self, speech: bool = True) -> None:
         self.speech = speech
         self.processed = 0
+        self.settled = None
+
+    def settled_span(self, min_silence_ms: int = 0):
+        return self.settled
 
     def process(self, audio: bytes) -> None:
         self.processed += len(audio)
@@ -660,6 +668,99 @@ def test_vad_clip_shortens_only_the_final_pass() -> None:
     # ...the intermediate pass read everything, and the final pass the middle.
     assert model.calls[0][0] == 1600
     assert model.calls[-1][0] == 1600
+
+
+class _SpanClipper(_FakeClipper):
+    """Clips to the span settled_span() last reported."""
+
+    def clip(self, audio: bytes) -> bytes:
+        start, end = self.settled
+        return audio[start:end]
+
+
+def test_speech_end_pass_is_the_final_pass() -> None:
+    model = _FakeStreamingModel()
+    clipper = _SpanClipper()
+    session = _session(model, chunk_seconds=10, clipper=clipper)
+    session.accept_chunk(_silence(0.1))
+    assert not model.calls
+
+    # Quiet for long enough: the clip can't change unless speech resumes.
+    clipper.settled = (200, 2200)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert model.calls == [(1000, [])]
+
+    # More silence changes nothing, and audio-stop has nothing left to do.
+    session.accept_chunk(_silence(0.1))
+    assert session.finish() == "10 tokens"
+    assert len(model.calls) == 1
+
+
+def test_finish_waits_for_a_running_speech_end_pass() -> None:
+    model = _FakeStreamingModel()
+    model.gate.clear()
+    clipper = _SpanClipper()
+    clipper.settled = (0, 3200)
+    session = _session(model, chunk_seconds=10, clipper=clipper)
+    session.accept_chunk(_silence(0.1))
+
+    threading.Timer(0.1, model.gate.set).start()
+    assert session.finish() == "16 tokens"
+    # Waited for it rather than aborting it and decoding again.
+    assert model.aborted == 0
+    assert model.calls == [(1600, [])]
+
+
+def test_speech_after_a_pause_starts_over() -> None:
+    model = _FakeStreamingModel()
+    clipper = _SpanClipper()
+    session = _session(model, chunk_seconds=10, clipper=clipper)
+    session.accept_chunk(_silence(0.1))
+
+    # A pause mid-command starts a speech-end pass...
+    model.gate.clear()
+    clipper.settled = (0, 3200)
+    session.accept_chunk(_silence(0.1))
+
+    # ...which is dropped when the speaker carries on.
+    clipper.settled = None
+    session.accept_chunk(_silence(0.1))
+    clipper.settled = (0, 6400)
+    session.accept_chunk(_silence(0.1))
+    deadline = time.monotonic() + 5
+    while (model.aborted < 1) and (time.monotonic() < deadline):
+        time.sleep(0.01)
+
+    model.gate.set()
+    _drain(session)
+    assert model.aborted == 1
+    assert model.calls == [(3200, [])]
+
+    assert session.finish() == "32 tokens"
+    assert len(model.calls) == 1
+
+
+def test_no_intermediate_passes_after_speech_ends() -> None:
+    model = _FakeStreamingModel()
+    clipper = _SpanClipper()
+    clipper.settled = (0, 1600)
+    session = _session(model, clipper=clipper)
+    for _ in range(4):
+        session.accept_chunk(_silence(0.1))
+        _drain(session)
+
+    # Only the speech-end pass: the silence after it has nothing to decode.
+    assert model.calls == [(800, [])]
+
+
+def test_a_pass_that_heard_everything_is_reused() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    assert session.finish() == "16 tokens"
+    assert model.calls == [(1600, [])]
 
 
 def test_vad_clip_without_speech_uses_all_audio() -> None:

@@ -85,6 +85,7 @@ class StreamingSpeechClipper:
         self._chunk_bytes = self._detector.chunk_bytes()
         self._pending = b""
         self._probs: List[float] = []
+        self._last_speech = -1  # index of the last window at/above threshold
 
     def process(self, audio: bytes) -> None:
         """Run the VAD over the next piece of 16 kHz 16-bit mono PCM."""
@@ -95,9 +96,12 @@ class StreamingSpeechClipper:
         # and skips the last one when given an exact multiple, which a stream of
         # pieces would hit on every piece.
         for start in range(0, usable, self._chunk_bytes):
-            self._probs.append(
-                self._detector.process_chunk(audio[start : start + self._chunk_bytes])
+            prob = self._detector.process_chunk(
+                audio[start : start + self._chunk_bytes]
             )
+            if prob >= self.threshold:
+                self._last_speech = len(self._probs)
+            self._probs.append(prob)
 
         self._pending = audio[usable:]
 
@@ -114,6 +118,27 @@ class StreamingSpeechClipper:
 
         start, end = span
         return audio[start * self._chunk_bytes : end * self._chunk_bytes]
+
+    def settled_span(self, min_silence_ms: int = 0) -> Optional[Tuple[int, int]]:
+        """The [start, end) byte range clip() will keep unless speech resumes.
+
+        None until there has been speech followed by enough silence to cover
+        the trailing pad and at least ``min_silence_ms``: before that, more
+        audio would still extend the clip.
+        """
+        if self._last_speech < 0:
+            return None
+
+        silence = len(self._probs) - (self._last_speech + 1)
+        chunk_samples = self._detector.chunk_samples()
+        needed = max(self.pad_ms, min_silence_ms) * RATE // 1000
+        if silence * chunk_samples < needed:
+            return None
+
+        span = speech_span(self._probs, self.threshold, self.pad_ms, chunk_samples)
+        assert span is not None
+        start, end = span
+        return start * self._chunk_bytes, end * self._chunk_bytes
 
 
 def clip_wav_to_speech(
