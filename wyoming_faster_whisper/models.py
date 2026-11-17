@@ -179,6 +179,10 @@ class ModelLoader:
             streaming = self.sherpa_streaming and (stt_library == SttLibrary.SHERPA)
             if language in library_languages(stt_library, streaming=streaming):
                 languages.add(language)
+            elif self.model is not None and language in WHISPER_LANGUAGES:
+                # A custom model's languages are unknown; the backend's default
+                # model list would wrongly narrow it (e.g. to GigaAM's "ru").
+                languages.add(language)
 
         return languages
 
