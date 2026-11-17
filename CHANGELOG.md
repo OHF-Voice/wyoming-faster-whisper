@@ -57,6 +57,9 @@
   tag like `pt-BR` arrives verbatim. The region is stripped when that helps,
   otherwise the language is left to auto-detection
 
+- The Docker image is now based on Ubuntu 24.04 instead of Debian bookworm, the
+  same release as the GPU image's CUDA base. Python goes from 3.11 to 3.12
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an

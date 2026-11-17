@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 ARG TARGETARCH
 ARG TARGETVARIANT
 
