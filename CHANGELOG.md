@@ -57,6 +57,11 @@
   tag like `pt-BR` arrives verbatim. The region is stripped when that helps,
   otherwise the language is left to auto-detection
 
+- A sherpa model download that is interrupted (a timeout, Ctrl-C, a container
+  stop) no longer leaves a truncated model behind that every later start then
+  fails to load ("Protobuf parsing failed"). Models are extracted into a
+  temporary directory and moved into place only once complete
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an

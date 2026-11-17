@@ -16,6 +16,14 @@ from wyoming.info import Describe, Info
 from . import _DIR, _LOCAL_DIR, _SAMPLES_PER_CHUNK, _START_TIMEOUT, _TRANSCRIBE_TIMEOUT
 
 
+def _download_sherpa_model(streaming: bool) -> None:
+    from wyoming_faster_whisper.models import SttLibrary, guess_model
+    from wyoming_faster_whisper.sherpa_handler import _ensure_model
+
+    model_id = guess_model(SttLibrary.SHERPA, "en", is_arm=False, streaming=streaming)
+    _ensure_model(model_id, _LOCAL_DIR)
+
+
 def _needs(module: str):
     """Skip a param when the backend's package isn't installed (e.g. funasr in CI)."""
     return pytest.mark.skipif(
@@ -52,6 +60,14 @@ def _needs(module: str):
 )
 @pytest.mark.asyncio
 async def test_faster_whisper(stt_library: str, model: str, extra_args: list) -> None:
+    if stt_library == "sherpa":
+        # The server downloads its model before it answers Describe, and the
+        # sherpa models are hundreds of megabytes: fetch it first, so that
+        # _START_TIMEOUT covers starting up rather than the download.
+        await asyncio.to_thread(
+            _download_sherpa_model, "--sherpa-streaming" in extra_args
+        )
+
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",

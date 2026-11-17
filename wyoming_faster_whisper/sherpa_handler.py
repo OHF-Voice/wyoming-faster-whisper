@@ -3,6 +3,7 @@
 import logging
 import shutil
 import tarfile
+import tempfile
 import urllib.request
 import wave
 from pathlib import Path
@@ -93,18 +94,29 @@ def _ensure_model(
         _LOGGER.info("Downloading %s", url)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Extract next to the final location and move it into place only once
+        # complete. The model directory existing is what marks the model as
+        # downloaded, so a download that is killed part-way (a timeout, Ctrl-C,
+        # a container stop) must not leave it behind holding truncated files.
+        staging_dir = Path(
+            tempfile.mkdtemp(prefix=f".{model_id}.", suffix=".partial", dir=cache_dir)
+        )
         try:
-            # Download/extract to cache dir.
             # We assume that the .tar.bz2 contains a directory named after
             # the model id.
             with urllib.request.urlopen(url) as response:
                 with tarfile.open(fileobj=response, mode="r|bz2") as tar:
                     for member in tar:
-                        tar.extract(member, path=cache_dir)
-        except Exception:
-            # Delete directory so we'll download again next time
-            shutil.rmtree(model_dir, ignore_errors=True)
-            raise
+                        tar.extract(member, path=staging_dir)
+
+            try:
+                (staging_dir / model_id).rename(model_dir)
+            except OSError:
+                # Another process finished the same download first.
+                if not model_dir.is_dir():
+                    raise
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     return model_dir
 
