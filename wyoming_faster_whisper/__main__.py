@@ -177,7 +177,8 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Transcribe while audio arrives: decode again every 2 seconds, "
         "checking the previous pass's transcript as a draft, which cuts latency "
-        "after the audio stops at the cost of CPU while the speaker is talking "
+        "after the audio stops at the cost of CPU while the speaker is talking; "
+        "with --vad-clip, the final pass starts as soon as the speaker stops "
         "(qwen3-asr only)",
     )
     parser.add_argument(

@@ -60,3 +60,45 @@ def test_streaming_clip_of_silence_is_empty() -> None:
     clipper = StreamingSpeechClipper()
     clipper.process(audio)
     assert clipper.clip(audio) == b""
+
+
+def _speech_only() -> bytes:
+    # The recording has silence of its own after the command.
+    return clip_to_speech(_speech(), pad_ms=0)
+
+
+def test_settled_span_waits_for_the_trailing_pad() -> None:
+    audio = _silence(0.5) + _speech_only()
+    clipper = StreamingSpeechClipper(pad_ms=400)
+    clipper.process(audio)
+    # Still speaking (or not yet quiet for the pad): more audio could extend it.
+    assert clipper.settled_span() is None
+
+    clipper.process(_silence(0.2))
+    assert clipper.settled_span() is None
+
+    clipper.process(_silence(0.3))
+    span = clipper.settled_span()
+    assert span is not None
+
+    # ...and it is exactly what clip() keeps, however much silence follows.
+    audio += _silence(0.5)
+    start, end = span
+    assert audio[start:end] == clipper.clip(audio)
+
+    clipper.process(_silence(1.0))
+    assert clipper.settled_span() == span
+    assert clipper.clip(audio + _silence(1.0)) == audio[start:end]
+
+
+def test_settled_span_needs_the_minimum_silence_too() -> None:
+    clipper = StreamingSpeechClipper(pad_ms=0)
+    clipper.process(_speech_only() + _silence(0.2))
+    assert clipper.settled_span() is not None
+    assert clipper.settled_span(min_silence_ms=500) is None
+
+
+def test_settled_span_of_silence_is_none() -> None:
+    clipper = StreamingSpeechClipper()
+    clipper.process(_silence(2.0))
+    assert clipper.settled_span() is None
