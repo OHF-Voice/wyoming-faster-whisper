@@ -342,6 +342,7 @@ def _languages(
     model=None,
     *,
     sherpa_streaming=False,
+    qwen3_asr_streaming=False,
     **avail,
 ) -> set:
     """Report what a configuration would advertise, with backends faked."""
@@ -358,6 +359,7 @@ def _languages(
         initial_prompt=None,
         vad_parameters=None,
         sherpa_streaming=sherpa_streaming,
+        qwen3_asr_streaming=qwen3_asr_streaming,
     )
     # _available_backends is memoized, so seeding the cache stands in for
     # whichever extras happen to be installed in the test environment.
@@ -411,6 +413,39 @@ def test_streaming_sherpa_reports_only_the_published_kroko_languages() -> None:
     assert _languages(SttLibrary.FUNASR, sherpa_streaming=True) == (
         SENSE_VOICE_LANGUAGES
     )
+
+
+def test_streaming_qwen3_reports_the_same_languages() -> None:
+    assert _languages(SttLibrary.QWEN3_ASR, qwen3_asr_streaming=True) == (
+        QWEN3_ASR_LANGUAGES
+    )
+
+
+def test_each_streaming_flag_applies_only_to_its_backend() -> None:
+    sherpa = _loader(sherpa_streaming=True)
+    assert sherpa.is_streaming(SttLibrary.SHERPA)
+    assert not sherpa.is_streaming(SttLibrary.QWEN3_ASR)
+
+    qwen3 = _loader(qwen3_asr_streaming=True)
+    assert qwen3.is_streaming(SttLibrary.QWEN3_ASR)
+    assert not qwen3.is_streaming(SttLibrary.SHERPA)
+    assert not qwen3.is_streaming(SttLibrary.FASTER_WHISPER)
+
+
+@pytest.mark.asyncio
+async def test_qwen3_streaming_reaches_the_builder() -> None:
+    loader = _loader(qwen3_asr_streaming=True)
+    loader.preferred_stt_library = SttLibrary.QWEN3_ASR
+    loader._available = dict(_ALL_AVAILABLE)  # noqa: SLF001
+    built: list = []
+
+    def build(stt_library, model, streaming, local_files_only):
+        built.append((stt_library, streaming))
+        return object()
+
+    loader._build_transcriber = build  # type: ignore[method-assign]
+    await loader.load_transcriber("en")
+    assert built == [(SttLibrary.QWEN3_ASR, True)]
 
 
 def test_missing_backend_falls_back_to_the_whisper_list() -> None:
