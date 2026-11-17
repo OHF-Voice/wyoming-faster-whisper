@@ -13,6 +13,7 @@ from wyoming.server import AsyncServer, AsyncTcpServer
 
 from . import __version__
 from .const import AUTO_LANGUAGE, AUTO_MODEL, HASS_API_URL, SttLibrary, base_language
+from .cpu import default_cpu_threads
 from .dispatch_handler import DispatchEventHandler
 from .env_args import ENV_PREFIX
 from .env_args import parse_args as parse_args_with_env
@@ -95,9 +96,11 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cpu-threads",
-        default=4,
+        default=0,
         type=int,
-        help="Number of CPU threads to use for inference (default: 4, faster-whisper, sherpa-onnx, and qwen3-asr)",
+        help="Number of CPU threads to use for inference (0 for auto: one per "
+        "physical CPU core available; faster-whisper, sherpa-onnx, qwen3-asr, "
+        "and funasr)",
     )
     parser.add_argument(
         "--initial-prompt",
@@ -254,6 +257,10 @@ async def main() -> None:
     if args.beam_size <= 0:
         args.beam_size = 1 if is_arm else 5
         _LOGGER.debug("Beam size automatically selected: %s", args.beam_size)
+
+    if args.cpu_threads <= 0:
+        args.cpu_threads = default_cpu_threads()
+        _LOGGER.debug("CPU threads automatically selected: %s", args.cpu_threads)
 
     # Resolve model name
     model_name = args.model

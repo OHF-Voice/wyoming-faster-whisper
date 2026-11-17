@@ -2,6 +2,16 @@
 
 ## 3.9.0
 
+- `--cpu-threads` now defaults to `0`, meaning one thread per physical CPU core
+  this process may use, instead of a fixed 4. Hyperthreads are not counted, as a
+  second thread on the same core slows inference down, and CPU affinity
+  (`taskset`, `docker --cpuset-cpus`) and a cgroup CPU quota (`docker --cpus`)
+  both narrow the count. On an 8-core/16-thread Ryzen 7 5700X, the new default
+  of 8 took 9-20% less time per command than 4 for qwen3-asr, sherpa, and
+  faster-whisper, while 16 would have taken 8% and 60% more than 4 for qwen3-asr
+  and sherpa. A Raspberry Pi 5
+  (four cores, no SMT) still gets 4
+
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are
   installed dynamically downstream, so pinning one with `--stt-library` used to
