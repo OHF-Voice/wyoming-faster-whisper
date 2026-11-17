@@ -279,7 +279,9 @@ class _PrefillRecorder:
         self._mel_filters = _mel_filterbank()
         self._encoder_inputs = ["mel"]
         self._encoder = SimpleNamespace(
-            run=lambda names, inputs, run_options=None: [np.zeros((1, 2, 4), dtype=np.float32)]
+            run=lambda names, inputs, run_options=None: [
+                np.zeros((1, 2, 4), dtype=np.float32)
+            ]
         )
         self._merged = object()
 
@@ -354,9 +356,9 @@ class _FakeStreamingModel:
         return f"{len(tokens)} tokens"
 
 
-def _session(model, chunk_seconds: float = 0.1):
+def _session(model, chunk_seconds: float = 0.1, clipper=None):
     return qwen3_asr_handler.Qwen3AsrStreamingSession(
-        model, "en", None, chunk_seconds=chunk_seconds
+        model, "en", None, chunk_seconds=chunk_seconds, clipper=clipper
     )
 
 
@@ -478,6 +480,62 @@ def test_finish_with_no_audio_is_empty() -> None:
     model = _FakeStreamingModel()
     assert _session(model).finish() == ""
     assert not model.calls
+
+
+class _FakeClipper:
+    """Keeps the middle half of the audio, or finds no speech at all."""
+
+    def __init__(self, speech: bool = True) -> None:
+        self.speech = speech
+        self.processed = 0
+
+    def process(self, audio: bytes) -> None:
+        self.processed += len(audio)
+
+    def clip(self, audio: bytes) -> bytes:
+        if not self.speech:
+            return b""
+
+        quarter = (len(audio) // 8) * 2
+        return audio[quarter : len(audio) - quarter]
+
+
+def test_vad_clip_shortens_only_the_final_pass() -> None:
+    model = _FakeStreamingModel()
+    clipper = _FakeClipper()
+    session = _session(model, clipper=clipper)
+    session.accept_chunk(_silence(0.1))
+    _drain(session)
+    session.accept_chunk(_silence(0.1)[:1001])
+    session.accept_chunk(_silence(0.1)[1001:])
+    session.finish()
+
+    # The VAD saw every (whole-sample) byte as it arrived...
+    assert clipper.processed == 2 * 3200
+    # ...the intermediate pass read everything, and the final pass the middle.
+    assert model.calls[0][0] == 1600
+    assert model.calls[-1][0] == 1600
+
+
+def test_vad_clip_without_speech_uses_all_audio() -> None:
+    model = _FakeStreamingModel()
+    session = _session(model, chunk_seconds=10, clipper=_FakeClipper(speech=False))
+    session.accept_chunk(_silence(0.1))
+    session.finish()
+    assert model.calls == [(1600, [])]
+
+
+def test_streaming_transcriber_clips_only_when_asked(tmp_path, stub_runtime) -> None:
+    model_dir = str(_fake_model_dir(tmp_path, merged=True))
+    plain = qwen3_asr_handler.Qwen3AsrStreamingTranscriber(model_dir, str(tmp_path))
+    assert plain.start_stream("en").clipper is None
+
+    clipping = qwen3_asr_handler.Qwen3AsrStreamingTranscriber(
+        model_dir, str(tmp_path), vad_clip=True, vad_clip_pad_ms=200
+    )
+    clipper = clipping.start_stream("en").clipper
+    assert clipper is not None
+    assert clipper.pad_ms == 200
 
 
 def test_streaming_transcriber_starts_streaming_sessions(

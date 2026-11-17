@@ -10,6 +10,10 @@
   than waited for when the audio stops. Post-stop latency is unchanged for short
   commands and ~25-35% lower from ~7 seconds of audio up; transcripts matched
   batch on every clip measured
+  - `--vad-clip` applies to it as well: the final pass skips the silence around
+    the speech, which on short commands cuts the time after audio-stop by
+    10-17%. The VAD runs as the audio arrives, so clipping costs nothing after
+    audio-stop
 
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are

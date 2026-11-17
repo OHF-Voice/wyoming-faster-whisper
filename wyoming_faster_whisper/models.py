@@ -345,6 +345,13 @@ class ModelLoader:
                     local_files_only=local_files_only,
                     cpu_threads=self.cpu_threads,
                     device=self.device,
+                    # The dispatcher clips only batch WAVs, so a streaming
+                    # session has to apply --vad-clip itself.
+                    vad_clip=vad_clip_enabled(
+                        stt_library, self.vad_clip, self.vad_clip_libraries
+                    ),
+                    vad_clip_threshold=self.vad_clip_threshold,
+                    vad_clip_pad_ms=self.vad_clip_pad_ms,
                 )
 
             from .qwen3_asr_handler import Qwen3AsrTranscriber  # noqa: F811
