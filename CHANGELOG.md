@@ -62,6 +62,26 @@
   fails to load ("Protobuf parsing failed"). Models are extracted into a
   temporary directory and moved into place only once complete
 
+- `--language` is now used when a client sends no `transcribe` event, which the
+  Wyoming protocol makes optional. It already chose the backend and model, but
+  the transcriber was then called with no language and auto-detected, so a short
+  command could come back in the wrong language. Home Assistant always sends the
+  event and is unaffected; a language it sends still wins
+
+- PyAV is constrained below 19. PyAV 19 removed the `metadata_errors` argument
+  that faster-whisper 1.2.1 still passes to `av.open()`, so fresh installs failed
+  every faster-whisper transcription with `TypeError`
+
+- The Docker image's run script now `exec`s the server, so it receives `SIGTERM`
+  from `docker stop` / `docker compose down` and shuts down cleanly instead of
+  being killed after the stop timeout
+
+- Home Assistant name biasing now says why when the token is refused: reading
+  which entities are exposed (`homeassistant/expose_entity/list`) is
+  admin-only in Home Assistant, so a token from a non-admin user authenticates
+  but every refresh failed with a bare `unauthorized`. The README now says the
+  token must belong to an administrator
+
 ## 3.8.1
 
 - Streaming sherpa-onnx models no longer cut off the last word or two of an
