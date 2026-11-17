@@ -287,6 +287,17 @@ async def test_a_refused_command_raises():
         await server.close()
 
 
+async def test_a_non_admin_token_says_so():
+    # Home Assistant answers admin-only commands for a non-admin user with
+    # code "unauthorized", after auth has already succeeded.
+    hass, server = await _client(_app(fail_command="homeassistant/expose_entity/list"))
+    try:
+        with pytest.raises(HomeAssistantError, match="administrator"):
+            await hass.get_context()
+    finally:
+        await server.close()
+
+
 async def test_an_unreachable_home_assistant_raises():
     # Nothing is listening on this port.
     hass = HomeAssistant(TOKEN, api_url="http://127.0.0.1:1/api", timeout=2.0)

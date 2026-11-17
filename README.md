@@ -107,6 +107,12 @@ Requires the `hass` extra:
 pip install 'wyoming-faster-whisper[hass]'
 ```
 
+The token must belong to a Home Assistant **administrator**. Home Assistant only
+lets administrators list which entities are exposed to Assist, so a non-admin
+user's token authenticates but every refresh is refused as `unauthorized`.
+Create the token on that user's profile page, under **Security** → **Long-lived
+access tokens**.
+
 It collects the names of **conversation-exposed** entities and their aliases, plus
 your area and floor names — the names a speaker can actually say. It also reads
 which area each exposed entity is in, so the areas you can actually command rank
