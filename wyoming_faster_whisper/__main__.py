@@ -175,9 +175,10 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--qwen3-asr-streaming",
         action="store_true",
-        help="Transcribe while audio arrives: decode again every 2 seconds and "
-        "carry the stable part forward, which cuts latency after the audio stops "
-        "at the cost of CPU while the speaker is talking (qwen3-asr only)",
+        help="Transcribe while audio arrives: decode again every 2 seconds, "
+        "checking the previous pass's transcript as a draft, which cuts latency "
+        "after the audio stops at the cost of CPU while the speaker is talking "
+        "(qwen3-asr only)",
     )
     parser.add_argument(
         "--local-files-only",

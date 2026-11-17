@@ -211,31 +211,39 @@ byte-identical transcripts with no prompt (5.35% WER for both), and 5.33% vs
 `--qwen3-asr-streaming` makes `qwen3-asr` transcribe while the speaker is still
 talking, so less of the work is left for after the audio stops. Qwen3-ASR is not a
 streaming model — what it hears later can change how it reads what came before —
-so this follows the official Qwen3-ASR recipe: every 2 seconds of new audio it
-decodes everything so far again, and from the third pass on it carries that
-result forward, minus the last 5 tokens, for the next pass to read in one step
-rather than generate word by word. The final pass after the audio stops still
-reads all of it, so the transcript is the model's full-context answer, not a
-stitched-together one.
+so every 2 seconds of new audio it decodes everything so far again, and the final
+pass after the audio stops still reads all of it: the transcript is the model's
+full-context answer, not a stitched-together one.
 
-The trade is CPU while the speaker talks for latency once they stop, and it only
-pays off on longer audio: a short command gets one or two passes, too few to
-carry anything forward, and finishes in the same time as without the flag.
-Measured on a desktop CPU (4 threads, English, no prompt), time from audio-stop
-to transcript:
+What makes the later passes cheaper is that each one is given the previous pass's
+transcript as a draft. The model checks the whole draft in the same single pass
+that reads the audio, keeps every token of it that matches what it would have
+generated, and only generates from where they differ. Checking a token costs a
+fraction of generating one, and since a pass that heard most of the audio is
+usually right about most of it, the final pass mostly checks. When a word in the
+draft is wrong ("thirteen" where the full audio says "13"), decoding picks the
+draft up again a couple of tokens later rather than giving up on the rest.
+
+A draft never decides the transcript, only how fast it arrives. The one caveat
+is arithmetic: checking several tokens at once rounds slightly differently from
+generating them one at a time, which can tip a genuine near-tie. In testing that
+happened on 2 of 308 decodes: "13%" against "13 percent" from a Qwen3-ASR-1.7B
+export, and "Igboy" against "Igobi" (both wrong, for a name the model does not
+know) from the default 0.6B.
+
+The trade is CPU while the speaker talks for latency once they stop. Measured on
+a desktop CPU (4 threads, English, no prompt, `rhasspy/qwen3-asr-0.6b-onnx-int4-merged`),
+time from audio-stop to transcript:
 
 | Audio | batch | `--qwen3-asr-streaming` |
 | --- | --- | --- |
-| 3.5s | 0.46s | 0.46s |
-| 6.9s | 0.80s | 0.61s |
-| 10.0s | 1.24s | 0.95s |
-| 17.4s | 2.44s | 1.73s |
+| short commands, 1.9-3.5s (mean of 19) | 0.44s | 0.37s |
+| 6.9s | 0.76s | 0.52s |
+| 12.4s | 1.62s | 1.12s |
+| 17.4s | 2.35s | 1.64s |
 
-Transcripts were identical to batch in every case measured, but as the prefix is
-taken on trust, a mistake in it can survive into the final pass.
-
-`--vad-clip` (bare, or `--vad-clip qwen3-asr`) applies here too, and is where
-short commands gain: the final pass skips the silence around the speech, whose
+`--vad-clip` (bare, or `--vad-clip qwen3-asr`) applies here too, and saves short
+commands more on top: the final pass skips the silence around the speech, whose
 encoding and reading cost as much as speech does. The VAD runs as the audio
 arrives, so clipping adds nothing after audio-stop. On the same desktop it cut the
 time after audio-stop for 2-4s commands by 10% as recorded, and by 17% with 0.8s

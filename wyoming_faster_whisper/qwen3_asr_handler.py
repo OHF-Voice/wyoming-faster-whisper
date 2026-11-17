@@ -75,6 +75,11 @@ _EOS_IDS = frozenset((151643, 151645))
 
 _MAX_NEW_TOKENS = 256
 
+# Most draft tokens checked in one decoder step after the decode has left the
+# draft and found it again. A step is bound by reading the weights, so checking
+# a few tokens costs about the same as generating one.
+_MAX_GUESS_TOKENS = 16
+
 # Only these files are needed for int4 inference; the repo also holds multi-GB
 # FP32 weights and tarballs that we must not pull down.
 _ALLOW_PATTERNS = [
@@ -96,14 +101,9 @@ _ALLOW_PATTERNS = [
 # Presence of this file selects the merged layout.
 _MERGED_DECODER = "decoder_merged.int4.onnx"
 
-# Streaming (--qwen3-asr-streaming), after the official Qwen3-ASR recipe: decode
-# again every this many seconds of new audio...
+# Streaming (--qwen3-asr-streaming): decode all audio so far again every this
+# many seconds of new audio, checking the previous pass's transcript as a draft.
 _STREAM_CHUNK_SECONDS = 2.0
-# ...with no forced prefix for the first this many passes, whose short audio
-# makes for an unreliable hypothesis...
-_UNFIXED_CHUNKS = 2
-# ...and after that, forcing the previous result minus this many trailing tokens.
-_UNFIXED_TOKENS = 5
 
 # Additive attention mask: 0 where attending is allowed, this where it is not.
 # pylint cannot see finfo's attributes: numpy (2.5 here) ships no Python source for it.
@@ -178,6 +178,108 @@ def _system_ids(context_ids: Sequence[int]) -> List[int]:
     it precedes the audio, so nothing in it changes from one utterance to the next.
     """
     return [_IM_START, _SYSTEM, _NEWLINE, *context_ids, _IM_END, _NEWLINE]
+
+
+def _accept_draft(logits: np.ndarray, draft: Sequence[int]) -> List[int]:
+    """Greedy tokens implied by one prefill over a draft, as far as it holds.
+
+    ``logits`` has a row for the last prompt position and one per draft token:
+    row j is what greedy decoding would pick in place of ``draft[j]``. Draft
+    tokens are accepted while they match that pick; the returned list ends with
+    the model's own token at the first mismatch (or after the whole draft), which
+    has not been fed through the model yet. A matched end-of-text stops it early.
+    """
+    predicted = np.argmax(logits, axis=-1)
+    tokens: List[int] = []
+    for j, guess in enumerate(draft):
+        token = int(predicted[j])
+        tokens.append(token)
+        if (token != guess) or (token in _EOS_IDS):
+            return tokens
+
+    tokens.append(int(predicted[len(draft)]))
+    return tokens
+
+
+def _draft_continuation(
+    draft: Sequence[int], tokens: Sequence[int], cursor: int
+) -> Tuple[List[int], int]:
+    """Where the draft picks up again after the decode has left it.
+
+    Finds the last two decoded tokens in the draft, ending at or after
+    ``cursor``, and returns what follows them there along with that guess's
+    index in the draft. A draft often differs from the result only locally
+    ("thirteen" against "13"), and agrees again a word later. One token alone
+    is too weak a match: punctuation and short words recur all over a draft,
+    and every wrong guess costs a wider decoder step.
+    """
+    if len(tokens) < 2:
+        return [], cursor
+
+    tail = list(tokens[-2:])
+    for i in range(max(cursor - 2, 0), len(draft) - 2):
+        if list(draft[i : i + 2]) == tail:
+            return list(draft[i + 2 : i + 2 + _MAX_GUESS_TOKENS]), i + 2
+    return [], cursor
+
+
+def _continue_greedy(
+    logits: np.ndarray,
+    draft: Sequence[int],
+    n_prompt: int,
+    past_keys: np.ndarray,
+    past_values: np.ndarray,
+    step,
+    multi_token_steps: bool,
+) -> List[int]:
+    """Finish a greedy decode from a prefill that also ran ``draft``.
+
+    ``logits`` holds the prefill's rows from the last prompt position on, and the
+    KV cache covers the prompt and the whole draft. The cache is cut back to the
+    accepted draft tokens before decoding continues, so rejected ones are never
+    attended to. ``step(tokens, position, keys, values)`` runs the decoder over
+    ``tokens`` on top of the cache.
+
+    With ``multi_token_steps`` (the merged decoder; the split one's step graph
+    takes a single token), each step after a mismatch also checks where the
+    draft resumes, so one differing word does not cost the rest of the draft.
+    """
+    tokens = _accept_draft(logits, draft)
+    accepted = len(tokens) - 1
+    total_accepted = accepted
+
+    position = n_prompt + accepted
+    if accepted < len(draft):
+        past_keys = np.ascontiguousarray(past_keys[:, :, :, :position])
+        past_values = np.ascontiguousarray(past_values[:, :, :, :position])
+
+    cursor = accepted
+    while (tokens[-1] not in _EOS_IDS) and (len(tokens) < _MAX_NEW_TOKENS):
+        guess: List[int] = []
+        start = cursor
+        if multi_token_steps and draft:
+            guess, start = _draft_continuation(draft, tokens, cursor)
+
+        step_logits, past_keys, past_values = step(
+            [tokens[-1]] + guess, position, past_keys, past_values
+        )
+        new = _accept_draft(step_logits[0], guess)
+        accepted = len(new) - 1
+        total_accepted += accepted
+        tokens.extend(new)
+
+        # The step fed tokens[-1] and the whole guess; keep only what held.
+        if guess:
+            cursor = start + accepted
+        position += 1 + accepted
+        if accepted < len(guess):
+            past_keys = np.ascontiguousarray(past_keys[:, :, :, :position])
+            past_values = np.ascontiguousarray(past_values[:, :, :, :position])
+
+    if draft:
+        _LOGGER.debug("Draft: %s of %s token(s) accepted", total_accepted, len(draft))
+
+    return tokens[:_MAX_NEW_TOKENS]
 
 
 def _causal_mask(q_len: int, past_len: int) -> np.ndarray:
@@ -397,14 +499,16 @@ class Qwen3AsrTranscriber(Transcriber):
         audio_features: np.ndarray,
         prompt_ids: List[int],
         n_system: int,
+        draft: Sequence[int],
         run_options: Optional[ort.RunOptions] = None,
     ) -> List[int]:
         """Greedy decode reusing the system turn's KV across utterances."""
         past_keys, past_values = self._prefix_cache(prompt_ids[:n_system], run_options)
 
-        # Everything after the system turn: the audio placeholders and the
-        # assistant preamble. Audio features replace the placeholder embeddings.
-        rest = prompt_ids[n_system:]
+        # Everything after the system turn: the audio placeholders, the
+        # assistant preamble, and the draft. Audio features replace the
+        # placeholder embeddings.
+        rest = prompt_ids[n_system:] + list(draft)
         input_embeds = self._embed_tokens[rest].astype(np.float32)[np.newaxis, :, :]
         audio_at = prompt_ids.index(_AUDIO_PAD) - n_system
         input_embeds[0, audio_at : audio_at + audio_features.shape[1]] = audio_features[
@@ -413,44 +517,50 @@ class Qwen3AsrTranscriber(Transcriber):
 
         logits, past_keys, past_values = self._run_merged(
             input_embeds,
-            np.arange(n_system, len(prompt_ids)),
+            np.arange(n_system, len(prompt_ids) + len(draft)),
             past_keys,
             past_values,
             run_options,
         )
 
-        token = int(np.argmax(logits[0, -1, :]))
-        tokens = [token]
-        position = len(prompt_ids)
-
-        while (token not in _EOS_IDS) and (len(tokens) < _MAX_NEW_TOKENS):
-            logits, past_keys, past_values = self._run_merged(
-                self._embed_tokens[token].astype(np.float32)[np.newaxis, np.newaxis, :],
-                [position],
-                past_keys,
-                past_values,
+        def step(
+            tokens: List[int], position: int, keys: np.ndarray, values: np.ndarray
+        ):
+            return self._run_merged(
+                self._embed_tokens[tokens].astype(np.float32)[np.newaxis, :, :],
+                np.arange(position, position + len(tokens)),
+                keys,
+                values,
                 run_options,
             )
-            token = int(np.argmax(logits[0, -1, :]))
-            tokens.append(token)
-            position += 1
 
-        return tokens
+        return _continue_greedy(
+            logits[0, len(rest) - len(draft) - 1 :],
+            draft,
+            len(prompt_ids),
+            past_keys,
+            past_values,
+            step,
+            multi_token_steps=True,
+        )
 
     def _generate(
         self,
         audio_features: np.ndarray,
         prompt_ids: List[int],
+        draft: Sequence[int],
         run_options: Optional[ort.RunOptions] = None,
     ) -> List[int]:
         """Greedy decode on the split layout: prefill, then one token at a time."""
         assert (self._decoder_init is not None) and (self._decoder_step is not None)
+        decoder_step = self._decoder_step
+        input_ids = prompt_ids + list(draft)
 
         logits, past_keys, past_values = self._decoder_init.run(
             ["logits", "present_keys", "present_values"],
             {
-                "input_ids": np.array(prompt_ids, dtype=np.int64)[np.newaxis, :],
-                "position_ids": np.arange(len(prompt_ids), dtype=np.int64)[
+                "input_ids": np.array(input_ids, dtype=np.int64)[np.newaxis, :],
+                "position_ids": np.arange(len(input_ids), dtype=np.int64)[
                     np.newaxis, :
                 ],
                 "audio_features": audio_features,
@@ -461,43 +571,49 @@ class Qwen3AsrTranscriber(Transcriber):
             run_options,
         )
 
-        token = int(np.argmax(logits[0, -1, :]))
-        tokens = [token]
-        position = len(prompt_ids)
-
-        while (token not in _EOS_IDS) and (len(tokens) < _MAX_NEW_TOKENS):
-            logits, past_keys, past_values = self._decoder_step.run(
+        def step(
+            tokens: List[int], position: int, keys: np.ndarray, values: np.ndarray
+        ):
+            (token,) = tokens  # decoder_step is pinned to one token
+            return decoder_step.run(
                 ["logits", "present_keys", "present_values"],
                 {
                     "input_embeds": self._embed_tokens[token].astype(np.float32)[
                         np.newaxis, np.newaxis, :
                     ],
                     "position_ids": np.array([[position]], dtype=np.int64),
-                    "past_keys": past_keys,
-                    "past_values": past_values,
+                    "past_keys": keys,
+                    "past_values": values,
                 },
                 run_options,
             )
-            token = int(np.argmax(logits[0, -1, :]))
-            tokens.append(token)
-            position += 1
 
-        return tokens
+        return _continue_greedy(
+            logits[0, len(prompt_ids) - 1 :],
+            draft,
+            len(prompt_ids),
+            past_keys,
+            past_values,
+            step,
+            multi_token_steps=False,
+        )
 
     def decode_tokens(
         self,
         audio: np.ndarray,
         language: Optional[str],
         initial_prompt: Optional[str] = None,
-        prefix: Sequence[int] = (),
+        draft: Sequence[int] = (),
         run_options: Optional[ort.RunOptions] = None,
     ) -> List[int]:
         """Greedy-decode float32 16kHz ``audio`` into the model's raw tokens.
 
-        ``prefix`` is forced: it is appended to the prompt after the assistant
-        preamble and prefilled in a single pass, and generation continues from
-        it. The return value includes it, so it is the whole assistant turn
-        (detected-language preamble too) whether or not a prefix was given.
+        The result is the whole assistant turn, detected-language preamble too.
+        ``draft`` is a guess at it (such as an earlier decode of most of the same
+        audio). It does not change the result, only how fast it arrives: the
+        draft is checked in the same single pass that reads the prompt, every
+        token of it that matches greedy decoding is kept without a decoder step
+        of its own, and decoding carries on from the first mismatch.
 
         Setting ``run_options.terminate`` from another thread aborts the decode
         with an exception at the next graph node.
@@ -514,19 +630,19 @@ class Qwen3AsrTranscriber(Transcriber):
         context_ids, language_ids = self._context_ids(initial_prompt, language)
         prompt_ids = self._build_prompt_ids(
             audio_features.shape[1], context_ids, language_ids
-        ) + list(prefix)
+        )
+        draft = list(draft)[:_MAX_NEW_TOKENS]
 
         if self._merged is not None:
-            tokens = self._generate_merged(
+            return self._generate_merged(
                 audio_features,
                 prompt_ids,
                 len(_system_ids(context_ids)),
+                draft,
                 run_options,
             )
-        else:
-            tokens = self._generate(audio_features, prompt_ids, run_options)
 
-        return list(prefix) + tokens
+        return self._generate(audio_features, prompt_ids, draft, run_options)
 
     def tokens_to_text(self, tokens: Sequence[int]) -> str:
         """Turn the assistant turn into the transcript."""
@@ -569,12 +685,13 @@ class Qwen3AsrStreamingTranscriber(Qwen3AsrTranscriber):
     The model is not natively streaming: the encoder attends across its whole
     window and the mel front-end normalizes to the loudest frame, so the encoding
     of early audio changes as more arrives and nothing can be committed for good.
-    This follows the official Qwen3-ASR streaming recipe instead. Every
-    ``chunk_seconds`` of new audio, all of the audio so far is decoded again,
-    seeded with the previous pass's tokens minus the last few (which are the
-    ones most likely to change once more audio is heard). Those seeded tokens
-    are prefilled in a single pass rather than generated one at a time, so by
-    audio-stop the final pass is left to generate only the tail.
+    Instead, every ``chunk_seconds`` of new audio, all of the audio so far is
+    decoded again, with the previous pass's transcript as a draft (see
+    decode_tokens). Checking a draft token costs a fraction of generating one,
+    and a pass that heard most of the same audio is usually right about most of
+    it, so by audio-stop the final pass is mostly checking rather than
+    generating. A wrong draft costs only speed: the result is always the
+    model's own greedy decode.
     """
 
     def __init__(
@@ -655,7 +772,6 @@ class Qwen3AsrStreamingSession(StreamingSession):
         self._audio = bytearray()
         self._leftover = b""
         self._decoded_bytes = 0  # audio covered by the last pass started
-        self._passes = 0  # passes that finished successfully
         self._tokens: List[int] = []  # result of the last finished pass
         self._lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
@@ -689,13 +805,10 @@ class Qwen3AsrStreamingSession(StreamingSession):
         )
         self._worker.start()
 
-    def _prefix(self) -> List[int]:
-        """Tokens to force on the next pass: the last result minus its tail."""
+    def _draft(self) -> List[int]:
+        """The last finished pass's tokens, as a draft for the next one."""
         with self._lock:
-            if self._passes < _UNFIXED_CHUNKS:
-                return []
-
-            return self._tokens[: max(0, len(self._tokens) - _UNFIXED_TOKENS)]
+            return list(self._tokens)
 
     def _run_pass(self, audio_bytes: bytes, run_options: "ort.RunOptions") -> None:
         """One intermediate pass over all audio so far (background thread)."""
@@ -704,11 +817,11 @@ class Qwen3AsrStreamingSession(StreamingSession):
                 _bytes_to_samples(audio_bytes),
                 self.language,
                 self.initial_prompt,
-                prefix=self._prefix(),
+                draft=self._draft(),
                 run_options=run_options,
             )
         except Exception:  # pylint: disable=broad-exception-caught
-            # Only a hint for the final pass is lost; it re-reads all audio.
+            # Only a draft for the final pass is lost; it re-reads all audio.
             if run_options.terminate:
                 _LOGGER.debug("Intermediate Qwen3-ASR pass aborted")
             else:
@@ -717,7 +830,6 @@ class Qwen3AsrStreamingSession(StreamingSession):
 
         with self._lock:
             self._tokens = tokens
-            self._passes += 1
 
         _LOGGER.debug(
             "Partial transcript (%.2fs): %s",
@@ -730,7 +842,7 @@ class Qwen3AsrStreamingSession(StreamingSession):
             # Abort rather than wait: a pass still running is behind the audio
             # the final pass is about to read anyway, and waiting for it would
             # add its remaining time to the latency this is meant to cut. Its
-            # loss costs only the prefix it would have improved.
+            # loss costs only the draft it would have improved.
             assert self._run_options is not None
             self._run_options.terminate = True
             self._worker.join()
@@ -760,6 +872,6 @@ class Qwen3AsrStreamingSession(StreamingSession):
             _bytes_to_samples(audio),
             self.language,
             self.initial_prompt,
-            prefix=self._prefix(),
+            draft=self._draft(),
         )
         return self.model.tokens_to_text(tokens)

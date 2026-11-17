@@ -267,15 +267,162 @@ def test_log_mel_frame_count_and_range() -> None:
     assert mel.max() - mel.min() <= 2.0 + 1e-6
 
 
-# --- forced prefix ---------------------------------------------------------
+# --- draft verification ----------------------------------------------------
+
+
+_EOS = 151645
+_VOCAB = 16
+_FAKE_EOS = 13  # end of text in the fake decoder's 16-token vocabulary
+
+
+def _one_hot(tokens) -> np.ndarray:
+    rows = np.zeros((len(tokens), _VOCAB), dtype=np.float32)
+    for row, token in enumerate(tokens):
+        rows[row, token % _VOCAB] = 1.0
+    return rows
+
+
+class _FakeDecoder:
+    """A 'model' whose greedy output is always ``target``, with a fake KV cache.
+
+    Mirrors one prefill over the prompt plus a draft: row j of the prefill
+    logits picks target[j], whatever the draft says, and the cache gains one
+    position per token fed. Steps check the cache never holds a rejected token.
+    """
+
+    def __init__(self, target, n_prompt: int = 4) -> None:
+        self.target = list(target)
+        self.n_prompt = n_prompt
+        self.steps = 0
+
+    def prefill(self, draft):
+        logits = _one_hot(self.target[: len(draft) + 1])
+        if len(logits) < len(draft) + 1:  # target ended inside the draft
+            logits = np.concatenate(
+                [logits, _one_hot([0] * (len(draft) + 1 - len(logits)))]
+            )
+        fed = self.n_prompt + len(draft)
+        cache = np.zeros((1, 1, 1, fed, 1), dtype=np.float32)
+        # Tag each draft position: 1 if it matches the target there, else 2.
+        for j, token in enumerate(draft):
+            ok = j < len(self.target) and token == self.target[j]
+            cache[0, 0, 0, self.n_prompt + j, 0] = 1.0 if ok else 2.0
+        return logits, cache
+
+    def _target(self, index):
+        return self.target[index] if index < len(self.target) else 0
+
+    def step(self, tokens, position, keys, values):
+        self.steps += 1
+        assert keys.shape[3] == position, "cache length must match the position"
+        assert (keys != 2.0).all(), "a rejected draft token is still in the cache"
+        index = position - self.n_prompt
+        assert tokens[0] == self.target[index], "fed a token greedy would not pick"
+
+        # The first token is the confirmed one; any after it are guesses, tagged
+        # by whether they are right so a stale wrong one is caught next step.
+        tags = [1.0] + [
+            1.0 if token == self._target(index + j) else 2.0
+            for j, token in enumerate(tokens[1:], start=1)
+        ]
+        new = np.array(tags, np.float32).reshape(1, 1, 1, -1, 1)
+        keys = np.concatenate([keys, new], axis=3)
+        rows = [self._target(index + j + 1) for j in range(len(tokens))]
+        return _one_hot(rows)[np.newaxis], keys, keys
+
+
+def _decode(target, draft, multi_token_steps=True):
+    decoder = _FakeDecoder(target)
+    logits, cache = decoder.prefill(draft)
+    tokens = qwen3_asr_handler._continue_greedy(
+        logits,
+        draft,
+        decoder.n_prompt,
+        cache,
+        cache,
+        decoder.step,
+        multi_token_steps=multi_token_steps,
+    )
+    return tokens, decoder.steps
+
+
+_TARGET = [3, 5, 7, 9, 11, _FAKE_EOS]
+
+
+@pytest.fixture(name="small_eos")
+def small_eos_fixture(monkeypatch):
+    # Let the fake vocabulary end text the way the real one does.
+    monkeypatch.setattr(qwen3_asr_handler, "_EOS_IDS", frozenset({_FAKE_EOS}))
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        [],  # no draft: plain greedy decoding
+        _TARGET,  # entirely right
+        _TARGET[:3],  # right, but short
+        [3, 5, 8, 9],  # wrong from the third token
+        [4, 4, 4],  # wrong from the start
+        _TARGET + [1, 2, 3],  # right, then runs past the end of text
+    ],
+)
+def test_any_draft_gives_the_greedy_result(small_eos, draft) -> None:
+    tokens, _ = _decode(_TARGET, draft)
+    assert tokens == _TARGET
+
+
+_LONG = [3, 5, 7, 9, 2, 4, 6, 8, 10, 12, 14, 1, _FAKE_EOS]
+
+
+@pytest.mark.parametrize("multi_token_steps", [True, False])
+@pytest.mark.parametrize(
+    "draft",
+    [
+        [3, 5, 7, 15, 2, 4, 6, 8, 10, 12, 14, 1, _FAKE_EOS],  # one word differs
+        [3, 5, 7, 9, 4, 6, 8, 10, 12, 14, 1, _FAKE_EOS],  # one word missing
+        [3, 5, 7, 9, 2, 0, 4, 6, 8, 10, 12, 14, 1, _FAKE_EOS],  # one word extra
+        [3, 5, 2, 4, 2, 4, 2, 4],  # repeats that resemble the target
+    ],
+)
+def test_draft_is_found_again_after_a_difference(
+    small_eos, draft, multi_token_steps
+) -> None:
+    tokens, _ = _decode(_LONG, draft, multi_token_steps)
+    assert tokens == _LONG
+
+
+def test_finding_the_draft_again_saves_the_rest_of_it(small_eos) -> None:
+    draft = [3, 5, 7, 15, 2, 4, 6, 8, 10, 12, 14, 1, _FAKE_EOS]
+    _, single = _decode(_LONG, draft, multi_token_steps=False)
+    _, multi = _decode(_LONG, draft, multi_token_steps=True)
+    # One-token steps must generate everything after the difference; with
+    # multi-token steps the draft resumes once two tokens match it again.
+    assert single == len(_LONG) - 4
+    assert multi <= 3
+
+
+def test_an_accepted_draft_skips_its_decoder_steps(small_eos) -> None:
+    _, no_draft = _decode(_TARGET, [])
+    _, right = _decode(_TARGET, _TARGET)
+    _, half = _decode(_TARGET, _TARGET[:3])
+    assert no_draft == len(_TARGET) - 1
+    assert right == 0
+    assert half == len(_TARGET) - 4
+
+
+def test_accept_draft_stops_at_the_first_mismatch() -> None:
+    logits = _one_hot([3, 5, 7, 9])
+    assert qwen3_asr_handler._accept_draft(logits, [3, 5, 6]) == [3, 5, 7]
+    assert qwen3_asr_handler._accept_draft(logits, [3, 5, 7]) == [3, 5, 7, 9]
+    assert qwen3_asr_handler._accept_draft(logits[:1], []) == [3]
 
 
 class _PrefillRecorder:
-    """Enough of a transcriber for decode_tokens: records the prompt prefilled."""
+    """Enough of a transcriber for decode_tokens: records what is prefilled."""
 
     def __init__(self, generated) -> None:
         self.generated = list(generated)
-        self.prompts: list = []
+        self.calls: list = []
         self._mel_filters = _mel_filterbank()
         self._encoder_inputs = ["mel"]
         self._encoder = SimpleNamespace(
@@ -291,38 +438,37 @@ class _PrefillRecorder:
     def _build_prompt_ids(self, n_audio_tokens, context_ids, language_ids):
         return _build_prompt_ids(None, n_audio_tokens, context_ids, language_ids)
 
-    def _generate_merged(self, audio_features, prompt_ids, n_system, run_options):
-        self.prompts.append(prompt_ids)
+    def _generate_merged(
+        self, audio_features, prompt_ids, n_system, draft, run_options
+    ):
+        self.calls.append((prompt_ids, draft))
         return list(self.generated)
 
 
 decode_tokens = qwen3_asr_handler.Qwen3AsrTranscriber.decode_tokens
 
 
-def test_forced_prefix_follows_the_language_suffix() -> None:
-    model = _PrefillRecorder([7, 8, 151645])
+def test_draft_reaches_the_decoder_separately_from_the_prompt() -> None:
+    model = _PrefillRecorder([7, 8, _EOS])
     audio = np.zeros(1600, dtype=np.float32)
-    tokens = decode_tokens(model, audio, "en", None, prefix=[5, 6])
+    assert decode_tokens(model, audio, "en", None, draft=[5, 6]) == [7, 8, _EOS]
 
-    prompt = model.prompts[0]
-    assert prompt[-4:] == [3333, qwen3_asr_handler._ASR_TEXT, 5, 6]
-    # The prefix is part of the result, ahead of what was generated after it.
-    assert tokens == [5, 6, 7, 8, 151645]
+    prompt, draft = model.calls[0]
+    assert prompt[-2:] == [3333, qwen3_asr_handler._ASR_TEXT]
+    assert draft == [5, 6]
 
 
-def test_no_prefix_leaves_the_prompt_unchanged() -> None:
-    model = _PrefillRecorder([7, 151645])
+def test_no_draft_by_default() -> None:
+    model = _PrefillRecorder([7, _EOS])
     audio = np.zeros(1600, dtype=np.float32)
-    assert decode_tokens(model, audio, "en", None) == [7, 151645]
-    assert model.prompts[0][-1] == qwen3_asr_handler._ASR_TEXT
+    assert decode_tokens(model, audio, "en", None) == [7, _EOS]
+    assert model.calls[0][1] == []
 
 
 # --- streaming session -----------------------------------------------------
 
 
 _RATE = qwen3_asr_handler._RATE
-_UNFIXED_CHUNKS = qwen3_asr_handler._UNFIXED_CHUNKS
-_UNFIXED_TOKENS = qwen3_asr_handler._UNFIXED_TOKENS
 
 
 class _FakeStreamingModel:
@@ -336,7 +482,7 @@ class _FakeStreamingModel:
         self.aborted = 0
 
     def decode_tokens(
-        self, audio, language, initial_prompt, prefix=(), run_options=None
+        self, audio, language, initial_prompt, draft=(), run_options=None
     ):
         # Background passes (the ones with run_options) block like a long model
         # run until the gate opens, and terminate aborts them as ORT would.
@@ -345,7 +491,7 @@ class _FakeStreamingModel:
                 self.aborted += 1
                 raise RuntimeError("Exiting due to terminate flag being set to true.")
 
-        self.calls.append((len(audio), list(prefix)))
+        self.calls.append((len(audio), list(draft)))
         if self.fail_passes:
             self.fail_passes -= 1
             raise RuntimeError("boom")
@@ -410,24 +556,23 @@ def test_passes_do_not_queue_behind_a_running_one() -> None:
     assert model.calls[-1][0] == 6 * 1600
 
 
-def test_prefix_is_withheld_for_the_first_passes_then_rolled_back() -> None:
+def test_each_pass_drafts_from_the_last_one() -> None:
     model = _FakeStreamingModel()
     session = _session(model)
-    for _ in range(_UNFIXED_CHUNKS + 1):
+    for _ in range(3):
         session.accept_chunk(_silence(0.1))
         _drain(session)
 
-    prefixes = [prefix for _, prefix in model.calls]
-    assert prefixes[:_UNFIXED_CHUNKS] == [[]] * _UNFIXED_CHUNKS
-    # The previous result had 32 tokens; the last few are not forced.
-    previous = list(range((_UNFIXED_CHUNKS * 1600) // 100))
-    assert prefixes[_UNFIXED_CHUNKS] == previous[:-_UNFIXED_TOKENS]
+    drafts = [draft for _, draft in model.calls]
+    # The first pass has nothing to go on; each later one gets the previous
+    # pass's whole result (16 and 32 tokens here).
+    assert drafts == [[], list(range(16)), list(range(32))]
 
 
 def test_finish_aborts_a_running_pass_and_decodes_all_audio() -> None:
     model = _FakeStreamingModel()
     session = _session(model)
-    for _ in range(_UNFIXED_CHUNKS):
+    for _ in range(2):
         session.accept_chunk(_silence(0.1))
         _drain(session)
 
@@ -443,9 +588,9 @@ def test_finish_aborts_a_running_pass_and_decodes_all_audio() -> None:
     assert text == "56 tokens"
 
     # The final pass read everything and used the last *finished* pass's result.
-    length, prefix = model.calls[-1]
+    length, draft = model.calls[-1]
     assert length == 5600
-    assert prefix == list(range(32))[:-_UNFIXED_TOKENS]
+    assert draft == list(range(32))
 
 
 def test_odd_byte_chunks_are_reassembled() -> None:
@@ -466,14 +611,14 @@ def test_trailing_odd_byte_is_padded_into_a_sample() -> None:
     assert model.calls == [(101, [])]
 
 
-def test_a_failed_pass_only_loses_the_hint() -> None:
+def test_a_failed_pass_only_loses_the_draft() -> None:
     model = _FakeStreamingModel(fail_passes=1)
     session = _session(model)
     session.accept_chunk(_silence(0.1))
     _drain(session)
-    assert session._passes == 0
 
     assert session.finish() == "16 tokens"
+    assert model.calls[-1] == (1600, [])
 
 
 def test_finish_with_no_audio_is_empty() -> None:
