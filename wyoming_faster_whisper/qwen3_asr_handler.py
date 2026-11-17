@@ -45,6 +45,7 @@ from tokenizers import Tokenizer
 
 from .const import StreamingSession, Transcriber, qwen3_asr_language
 from .device import onnx_providers, warn_if_no_onnx_gpu
+from .vad import StreamingSpeechClipper
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -583,6 +584,9 @@ class Qwen3AsrStreamingTranscriber(Qwen3AsrTranscriber):
         cpu_threads: int = 4,
         device: str = "cpu",
         chunk_seconds: float = _STREAM_CHUNK_SECONDS,
+        vad_clip: bool = False,
+        vad_clip_threshold: float = 0.5,
+        vad_clip_pad_ms: int = 400,
     ) -> None:
         super().__init__(
             model_id,
@@ -592,6 +596,9 @@ class Qwen3AsrStreamingTranscriber(Qwen3AsrTranscriber):
             device=device,
         )
         self.chunk_seconds = chunk_seconds
+        self.vad_clip = vad_clip
+        self.vad_clip_threshold = vad_clip_threshold
+        self.vad_clip_pad_ms = vad_clip_pad_ms
 
     @property
     def supports_streaming(self) -> bool:
@@ -603,8 +610,17 @@ class Qwen3AsrStreamingTranscriber(Qwen3AsrTranscriber):
         beam_size: int = 5,
         initial_prompt: Optional[str] = None,
     ) -> StreamingSession:
+        clipper = (
+            StreamingSpeechClipper(self.vad_clip_threshold, self.vad_clip_pad_ms)
+            if self.vad_clip
+            else None
+        )
         return Qwen3AsrStreamingSession(
-            self, language, initial_prompt, chunk_seconds=self.chunk_seconds
+            self,
+            language,
+            initial_prompt,
+            chunk_seconds=self.chunk_seconds,
+            clipper=clipper,
         )
 
 
@@ -624,8 +640,12 @@ class Qwen3AsrStreamingSession(StreamingSession):
         language: Optional[str],
         initial_prompt: Optional[str],
         chunk_seconds: float = _STREAM_CHUNK_SECONDS,
+        clipper: Optional[StreamingSpeechClipper] = None,
     ) -> None:
         self.model = model
+        # --vad-clip: silence around the speech is clipped off the final pass,
+        # whose encoder and prefill cost both grow with the audio's length.
+        self.clipper = clipper
         self.language = language
         self.initial_prompt = initial_prompt
         # Two bytes per 16-bit sample.
@@ -649,6 +669,8 @@ class Qwen3AsrStreamingSession(StreamingSession):
             self._leftover = b""
 
         self._audio.extend(audio_bytes)
+        if self.clipper is not None:
+            self.clipper.process(audio_bytes)
 
         if (len(self._audio) - self._decoded_bytes) < self._chunk_bytes:
             return
@@ -720,8 +742,21 @@ class Qwen3AsrStreamingSession(StreamingSession):
         if not self._audio:
             return ""
 
+        audio = bytes(self._audio)
+        if self.clipper is not None:
+            clipped = self.clipper.clip(audio)
+            if clipped:
+                _LOGGER.debug(
+                    "VAD clip: %d ms -> %d ms",
+                    len(audio) * 1000 // (2 * _RATE),
+                    len(clipped) * 1000 // (2 * _RATE),
+                )
+                audio = clipped
+            else:
+                _LOGGER.debug("VAD clip: no speech detected, using full audio")
+
         tokens = self.model.decode_tokens(
-            _bytes_to_samples(bytes(self._audio)),
+            _bytes_to_samples(audio),
             self.language,
             self.initial_prompt,
             prefix=self._prefix(),

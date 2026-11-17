@@ -448,6 +448,41 @@ async def test_qwen3_streaming_reaches_the_builder() -> None:
     assert built == [(SttLibrary.QWEN3_ASR, True)]
 
 
+@pytest.mark.parametrize(
+    ("vad_clip", "libraries", "expected"),
+    [
+        (False, None, False),
+        (True, None, True),
+        (True, {SttLibrary.QWEN3_ASR}, True),
+        (True, {SttLibrary.SHERPA}, False),
+    ],
+)
+def test_vad_clip_reaches_the_qwen3_streaming_session(
+    monkeypatch, vad_clip, libraries, expected
+) -> None:
+    # The dispatcher only clips batch WAVs, so the loader has to hand --vad-clip
+    # to the streaming transcriber itself.
+    handler = pytest.importorskip("wyoming_faster_whisper.qwen3_asr_handler")
+    seen: dict = {}
+    monkeypatch.setattr(
+        handler,
+        "Qwen3AsrStreamingTranscriber",
+        lambda model, **kwargs: seen.update(kwargs),
+    )
+
+    loader = _loader(
+        qwen3_asr_streaming=True,
+        vad_clip=vad_clip,
+        vad_clip_libraries=libraries,
+        vad_clip_pad_ms=250,
+    )
+    loader._build_transcriber(  # noqa: SLF001
+        SttLibrary.QWEN3_ASR, "model", True, local_files_only=True
+    )
+    assert seen["vad_clip"] is expected
+    assert seen["vad_clip_pad_ms"] == 250
+
+
 def test_missing_backend_falls_back_to_the_whisper_list() -> None:
     # guess_stt_library falls back to faster-whisper when the extra is absent,
     # and the reported languages have to follow it.

@@ -226,8 +226,16 @@ to transcript:
 | 17.4s | 2.44s | 1.73s |
 
 Transcripts were identical to batch in every case measured, but as the prefix is
-taken on trust, a mistake in it can survive into the final pass. `--vad-clip` does
-not apply in streaming mode.
+taken on trust, a mistake in it can survive into the final pass.
+
+`--vad-clip` (bare, or `--vad-clip qwen3-asr`) applies here too, and is where
+short commands gain: the final pass skips the silence around the speech, whose
+encoding and reading cost as much as speech does. The VAD runs as the audio
+arrives, so clipping adds nothing after audio-stop. On the same desktop it cut the
+time after audio-stop for 2-4s commands by 10% as recorded, and by 17% with 0.8s
+of trailing silence added — about what Home Assistant's own VAD waits for before
+it ends a command. As with batch clipping, the transcript can change: of seven
+test commands, one came out differently (equally wrong) when clipped.
 
 ## Docker Image
 
