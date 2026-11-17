@@ -8,7 +8,14 @@ on:
       - "v*.*.*" # e.g. v1.2.3
 
 jobs:
+  # Nothing is built or published unless the tagged commit passes tests and lint
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.read_ver.outputs.tag }}
