@@ -271,6 +271,37 @@ audio-stop (from 0.31s on average with clipping alone); with none added, the
 mean was 35 ms. If the speaker carries on after a pause, the early result just
 becomes the draft for the next pass.
 
+### The 1.7B qwen3-asr model
+
+`qwen3-asr` defaults to Qwen3-ASR-0.6B. A community int4 export of the 1.7B
+model, [`craigandrews/qwen3-asr-1.7b-onnx-int4-merged`](https://huggingface.co/craigandrews/qwen3-asr-1.7b-onnx-int4-merged),
+has the same merged layout, so name biasing and `--qwen3-asr-streaming` work with
+it unchanged:
+
+```sh
+--stt-library qwen3-asr --model craigandrews/qwen3-asr-1.7b-onnx-int4-merged
+```
+
+It is for a desktop CPU or a GPU, not a Raspberry Pi: on a Pi 5 the 0.6B model
+already needs 1.55 GB and 2.2s for a 3.2s command with 50 names (see the table
+above), and the 1.7B model took about twice the time and 1.8 times the memory on
+a desktop. Measured on 25 short commands in eight languages, at revision
+`d809a7c`:
+
+| | 0.6B (default) | 1.7B |
+| --- | --- | --- |
+| download | 0.79 GB | 1.81 GB |
+| desktop CPU (Ryzen 9 5950X, 4 threads) | 0.50s per command, 1.4 GB RAM | 1.0s, 2.5 GB |
+| GPU (RTX 2080 Ti) | 0.15s, 2.0 GB VRAM | 0.19s, 4.8 GB VRAM |
+
+What it buys is consistency more than accuracy. On these clips the two models
+mostly disagreed on style ("16" or "sixteen") and on spelling a name neither
+knew ("Ecobee"), which is what name biasing is for. But the 1.7B model gave the
+same 25 transcripts on onnxruntime 1.22 and 1.32 on a CPU and on CUDA, with a
+language set or auto-detected, while the 0.6B model settled its near-ties
+differently from one of those setups to the next. On a CPU in some of them, it
+misheard a Korean command that it gets right on a GPU.
+
 ## Docker Image
 
 ``` sh
