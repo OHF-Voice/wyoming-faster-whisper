@@ -11,7 +11,7 @@ import onnxruntime as ort
 from huggingface_hub import snapshot_download
 
 from .const import Transcriber
-from .device import onnx_providers, warn_if_no_onnx_gpu
+from .device import disable_onnx_spinning, onnx_providers, warn_if_no_onnx_gpu
 
 _RATE = 16000
 
@@ -39,7 +39,10 @@ class OnnxAsrTranscriber(Transcriber):
 
         with patch("huggingface_hub.snapshot_download", snapshot_download_with_cache):
             self.onnx_model = onnx_asr.load_model(
-                model_id, quantization=quantization, providers=onnx_providers(device)
+                model_id,
+                sess_options=disable_onnx_spinning(ort.SessionOptions()),
+                providers=onnx_providers(device),
+                quantization=quantization,
             )
 
     def transcribe(

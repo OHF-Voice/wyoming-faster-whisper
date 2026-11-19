@@ -5,6 +5,8 @@ as arguments, so the real STT backends need not be installed.
 """
 
 import logging
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +27,7 @@ from wyoming_faster_whisper.models import (
     guess_model,
     guess_stt_library,
     is_distil_whisper,
+    library_languages,
     vad_clip_enabled,
 )
 
@@ -287,6 +290,7 @@ def _loader(**kwargs) -> ModelLoader:
         local_files_only=kwargs.pop("local_files_only", False),
         model="Systran/faster-whisper-base",
         compute_type="default",
+        onnx_quantization=kwargs.pop("onnx_quantization", None),
         device="cpu",
         beam_size=5,
         cpu_threads=4,
@@ -294,6 +298,28 @@ def _loader(**kwargs) -> ModelLoader:
         vad_parameters=None,
         **kwargs,
     )
+
+
+def test_onnx_quantization_is_forwarded(monkeypatch) -> None:
+    calls = []
+
+    def transcriber(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "transcriber"
+
+    module = SimpleNamespace(OnnxAsrTranscriber=transcriber)
+    monkeypatch.setitem(sys.modules, "wyoming_faster_whisper.onnx_asr_handler", module)
+
+    loader = _loader(onnx_quantization="int8")
+    result = loader._build_transcriber(
+        SttLibrary.ONNX_ASR,
+        "nemo-parakeet-tdt-0.6b-v2",
+        streaming=False,
+        local_files_only=True,
+    )
+
+    assert result == "transcriber"
+    assert calls[0][1]["quantization"] == "int8"
 
 
 def _record_attempts(loader: ModelLoader, fail_cached: bool) -> list:
@@ -373,6 +399,7 @@ def _languages(
         local_files_only=False,
         model=model,
         compute_type="default",
+        onnx_quantization=None,
         device="cpu",
         beam_size=5,
         cpu_threads=4,
@@ -416,6 +443,18 @@ def test_auto_does_not_report_qwen3_only_languages() -> None:
 )
 def test_explicit_backend_reports_only_its_own_languages(library, expected) -> None:
     assert _languages(library) == expected
+
+
+@pytest.mark.parametrize(
+    "library", [SttLibrary.ONNX_ASR, SttLibrary.FUNASR, SttLibrary.SHERPA]
+)
+def test_custom_model_is_not_narrowed_to_the_default_models_languages(
+    library,
+) -> None:
+    # A custom model can't be inspected, so keep Whisper's list (as in 3.5.0).
+    languages = _languages(library, model="user/korean-ctc-onnx")
+    assert WHISPER_LANGUAGES <= languages
+    assert library_languages(library) <= languages
 
 
 def test_explicit_qwen3_reports_filipino_and_cantonese() -> None:

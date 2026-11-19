@@ -56,6 +56,7 @@ class ModelLoader:
         local_files_only: bool,
         model: Optional[str],
         compute_type: str,
+        onnx_quantization: Optional[str],
         device: str,
         beam_size: int,
         cpu_threads: int,
@@ -81,6 +82,7 @@ class ModelLoader:
         # faster-whisper only. On a GPU an unspecified compute type becomes
         # float16 rather than the model's own (int8, for the defaults here).
         self.compute_type = resolve_compute_type(compute_type, device)
+        self.onnx_quantization = onnx_quantization
 
         self.beam_size = beam_size
         self.cpu_threads = cpu_threads
@@ -180,6 +182,10 @@ class ModelLoader:
             stt_library = self.resolve_stt_library(language)
             streaming = self.sherpa_streaming and (stt_library == SttLibrary.SHERPA)
             if language in library_languages(stt_library, streaming=streaming):
+                languages.add(language)
+            elif self.model is not None and language in WHISPER_LANGUAGES:
+                # A custom model's languages are unknown; the backend's default
+                # model list would wrongly narrow it (e.g. to GigaAM's "ru").
                 languages.add(language)
 
         return languages
@@ -307,12 +313,17 @@ class ModelLoader:
         if stt_library == SttLibrary.ONNX_ASR:
             from .onnx_asr_handler import OnnxAsrTranscriber  # noqa: F811
 
-            # LT_ausys ships int8 files (MatMul-only quantization): on a CPU the
-            # same accuracy as fp32 on a 119-command intent exam, 1.7x faster and
-            # 0.7 GB instead of 2.5 GB. A GPU keeps fp32, as the sherpa backend
-            # does with its int8 preference.
-            quantization = None
-            if (model == LT_AUSYS_MODEL) and not is_gpu(self.device):
+            # An explicit --onnx-quantization wins. Otherwise LT_ausys loads its
+            # int8 files (MatMul-only quantization) on a CPU: the same accuracy
+            # as fp32 on a 119-command intent exam, 1.7x faster and 0.7 GB
+            # instead of 2.5 GB. A GPU keeps fp32, as the sherpa backend does
+            # with its int8 preference.
+            quantization = self.onnx_quantization
+            if (
+                (quantization is None)
+                and (model == LT_AUSYS_MODEL)
+                and not is_gpu(self.device)
+            ):
                 quantization = "int8"
 
             return OnnxAsrTranscriber(

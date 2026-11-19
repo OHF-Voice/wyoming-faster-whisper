@@ -1,22 +1,18 @@
 # Changelog
 
-## 3.9.0
+## 3.10.0
 
-- The languages reported to Home Assistant now follow the backend that will
-  actually run, instead of always being Whisper's 100 codes. Backends are
-  installed dynamically downstream, so pinning one with `--stt-library` used to
-  advertise up to 99 languages it cannot transcribe — `onnx-asr` (GigaAM) is
-  Russian-only, `funasr` (SenseVoice) covers five languages, `sherpa` 25, and
-  `--sherpa-streaming` only the four published Kroko models. Under the default
-  `--stt-library auto` nothing changes: the backend is picked per language with
-  faster-whisper as the fallback, so all 100 really are supported
-  - Codes Whisper has no token for are now reportable, which is the other half
-    of the bug: `qwen3-asr` supports Filipino (`fil`), and both Cantonese-capable
-    backends now advertise `zh-HK`
-  - A `.en` Whisper checkpoint reports only `en`. It has no language tokens at
-    all, so it transcribes English whatever is requested
-  - The old `PARAKEET_LANGUAGES` union was a no-op — all 25 codes were already
-    among Whisper's 100
+- `--cpu-threads` now defaults to `0`, meaning one thread per physical CPU core
+  this process may use, instead of a fixed 4. Hyperthreads are not counted, as a
+  second thread on the same core slows inference down, and CPU affinity
+  (`taskset`, `docker --cpuset-cpus`) and a cgroup CPU quota (`docker --cpus`)
+  both narrow the count. On an 8-core/16-thread Ryzen 7 5700X, the new default
+  of 8 took 9-20% less time per command than 4 for qwen3-asr, sherpa, and
+  faster-whisper, while 16 would have taken 8% and 60% more than 4 for qwen3-asr
+  and sherpa. A Raspberry Pi 5 (four cores, no SMT) still gets 4
+
+- Add `--onnx-quantization` to select quantized onnx-asr model artifacts, such
+  as `int8`, reducing memory use on constrained hosts (#102)
 
 - Lithuanian is routed to the `onnx-asr` backend when it is installed, the way
   Russian is routed to GigaAM. The default model for `lt` there is
@@ -34,6 +30,54 @@
     a GPU keeps fp32, as the sherpa backend does
   - Without the `onnx-asr` extra nothing changes: `lt` keeps falling back to
     faster-whisper. `--stt-library onnx-asr` now reports `lt` as well as `ru`
+
+## 3.9.1
+
+- A custom `--model` advertises all of Whisper's languages again, as it did in
+  3.5.0. Since 3.9.0 it was given the language list of its backend's *default*
+  model, which says nothing about a model the server cannot inspect without
+  downloading it: a custom `onnx-asr` model was advertised as Russian only
+  (GigaAM's list), and custom `sherpa` and `funasr` models were narrowed the
+  same way. Home Assistant then would not offer the model to a pipeline in its
+  own language, for example a Korean onnx-asr model to a Korean pipeline
+  (#148). Default models and `.en` checkpoints still advertise exactly what they
+  support
+
+- The `onnx-asr` and `qwen3-asr` backends no longer keep CPU cores busy after a
+  transcript is sent. onnxruntime's thread pools spin while waiting for more
+  work by default, which slows down whatever starts on the same cores next,
+  such as an LLM answering the command (#135). With onnx-asr's Parakeet on a
+  desktop CPU, each transcript left about half a core-second of spinning in the
+  second after it; that is now zero. onnx-asr transcribes no slower, and
+  qwen3-asr, which runs its decoder once per token, about 2% slower
+  - The `sherpa` backend still spins: sherpa-onnx creates its onnxruntime
+    sessions itself and does not expose the setting
+
+- The `funasr` extra now installs kaldi-native-fbank. FunASR computes
+  SenseVoice's features with torchaudio or, in recent releases,
+  kaldi-native-fbank, but declares neither, so an install with torch and
+  without torchaudio (for example alongside the `transformers` extra) failed
+  every SenseVoice transcription with `ImportError`. torch itself still has to
+  be installed separately. The Home Assistant app and the Docker image were not
+  affected
+
+## 3.9.0
+
+- The languages reported to Home Assistant now follow the backend that will
+  actually run, instead of always being Whisper's 100 codes. Backends are
+  installed dynamically downstream, so pinning one with `--stt-library` used to
+  advertise up to 99 languages it cannot transcribe — `onnx-asr` (GigaAM) is
+  Russian-only, `funasr` (SenseVoice) covers five languages, `sherpa` 25, and
+  `--sherpa-streaming` only the four published Kroko models. Under the default
+  `--stt-library auto` nothing changes: the backend is picked per language with
+  faster-whisper as the fallback, so all 100 really are supported
+  - Codes Whisper has no token for are now reportable, which is the other half
+    of the bug: `qwen3-asr` supports Filipino (`fil`), and both Cantonese-capable
+    backends now advertise `zh-HK`
+  - A `.en` Whisper checkpoint reports only `en`. It has no language tokens at
+    all, so it transcribes English whatever is requested
+  - The old `PARAKEET_LANGUAGES` union was a no-op — all 25 codes were already
+    among Whisper's 100
 
 - Cantonese is advertised as `zh-HK`, not only `yue`. Home Assistant's language
   matcher treats `yue` and `zh` as unrelated languages, and
