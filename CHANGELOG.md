@@ -27,7 +27,10 @@
     utterance; a transducer processes only the audio it is given
   - On a CPU the int8 files are loaded (MatMul-only quantization: the same
     accuracy as fp32 on a 119-command intent exam, 0.7 GB instead of 2.5 GB);
-    a GPU keeps fp32, as the sherpa backend does
+    a GPU keeps fp32, as the sherpa backend does. `--onnx-quantization`
+    overrides this
+  - The model is pinned to revision `caad00f`, so a later change to that
+    repository reaches users only through a release of this server
   - Without the `onnx-asr` extra nothing changes: `lt` keeps falling back to
     faster-whisper. `--stt-library onnx-asr` now reports `lt` as well as `ru`
 

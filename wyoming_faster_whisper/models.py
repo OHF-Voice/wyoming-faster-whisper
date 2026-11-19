@@ -13,6 +13,7 @@ from .const import (
     KROKO_STREAMING_LANGUAGES,
     LT_AUSYS_LANGUAGES,
     LT_AUSYS_MODEL,
+    LT_AUSYS_REVISION,
     PARAKEET_LANGUAGES,
     QWEN3_ASR_LANGUAGES,
     SENSE_VOICE_LANGUAGES,
@@ -332,6 +333,7 @@ class ModelLoader:
                 local_files_only=local_files_only,
                 device=self.device,
                 quantization=quantization,
+                revision=LT_AUSYS_REVISION if model == LT_AUSYS_MODEL else None,
             )
 
         if stt_library == SttLibrary.TRANSFORMERS:

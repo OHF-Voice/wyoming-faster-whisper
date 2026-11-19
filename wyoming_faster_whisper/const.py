@@ -215,6 +215,10 @@ GIGAAM_LANGUAGES = {"ru"}
 # and Common Voice, OpenMDW-1.1) exported to ONNX with the Lithuanian prompt
 # built in. Lithuanian-only.
 LT_AUSYS_MODEL = "RobertasTa/lt-ausys"
+# Pinned, so a later push to that repository cannot change what Lithuanian users
+# download without a review here. Its files were already replaced once under the
+# same name (the tag v1-kmynas holds the previous, differently shaped model).
+LT_AUSYS_REVISION = "caad00f466c904d9dbfd20d3b7ffc6f0b2fed289"
 LT_AUSYS_LANGUAGES = {"lt"}
 
 

@@ -16,6 +16,7 @@ from wyoming_faster_whisper.const import (
     KROKO_STREAMING_LANGUAGES,
     LT_AUSYS_LANGUAGES,
     LT_AUSYS_MODEL,
+    LT_AUSYS_REVISION,
     PARAKEET_LANGUAGES,
     QWEN3_ASR_LANGUAGES,
     SENSE_VOICE_LANGUAGES,
@@ -320,6 +321,40 @@ def test_onnx_quantization_is_forwarded(monkeypatch) -> None:
 
     assert result == "transcriber"
     assert calls[0][1]["quantization"] == "int8"
+
+
+def _onnx_asr_kwargs(monkeypatch, model: str, **loader_kwargs) -> dict:
+    """Return the keyword arguments the loader gives OnnxAsrTranscriber."""
+    calls = []
+
+    def transcriber(*args, **kwargs):
+        calls.append(kwargs)
+        return "transcriber"
+
+    module = SimpleNamespace(OnnxAsrTranscriber=transcriber)
+    monkeypatch.setitem(sys.modules, "wyoming_faster_whisper.onnx_asr_handler", module)
+    _loader(**loader_kwargs)._build_transcriber(
+        SttLibrary.ONNX_ASR, model, streaming=False, local_files_only=True
+    )
+    return calls[0]
+
+
+def test_lt_ausys_is_pinned_and_loads_int8_on_cpu(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, LT_AUSYS_MODEL)
+    assert kwargs["revision"] == LT_AUSYS_REVISION
+    assert kwargs["quantization"] == "int8"
+
+
+def test_onnx_quantization_overrides_the_lt_ausys_default(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, LT_AUSYS_MODEL, onnx_quantization="fp16")
+    assert kwargs["quantization"] == "fp16"
+    assert kwargs["revision"] == LT_AUSYS_REVISION
+
+
+def test_other_onnx_asr_models_are_not_pinned(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, "gigaam-v2-rnnt")
+    assert kwargs["revision"] is None
+    assert kwargs["quantization"] is None
 
 
 def _record_attempts(loader: ModelLoader, fail_cached: bool) -> list:
