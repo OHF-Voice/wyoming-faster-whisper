@@ -181,6 +181,15 @@ def get_parser() -> argparse.ArgumentParser:
         "(sherpa only; requires a streaming model, e.g. a streaming zipformer)",
     )
     parser.add_argument(
+        "--qwen3-asr-streaming",
+        action="store_true",
+        help="Transcribe while audio arrives: decode again every 2 seconds, "
+        "checking the previous pass's transcript as a draft, which cuts latency "
+        "after the audio stops at the cost of CPU while the speaker is talking; "
+        "with --vad-clip, the final pass starts as soon as the speaker stops "
+        "(qwen3-asr only)",
+    )
+    parser.add_argument(
         "--local-files-only",
         action="store_true",
         help="Never download a model: fail if it isn't already in --download-dir "
@@ -306,6 +315,7 @@ async def main() -> None:
         vad_parameters=vad_parameters,
         whisper_task=args.whisper_task,
         sherpa_streaming=args.sherpa_streaming,
+        qwen3_asr_streaming=args.qwen3_asr_streaming,
         vad_clip=vad_clip,
         vad_clip_threshold=args.vad_clip_threshold,
         vad_clip_pad_ms=args.vad_clip_pad_ms,

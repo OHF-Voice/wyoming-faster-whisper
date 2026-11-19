@@ -43,6 +43,33 @@
   less memory, but transcribes short commands about 2% slower. Other backends
   are unchanged in speed
 
+- Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
+  still arriving: all audio so far is decoded again every 2 seconds, each pass
+  checking the previous pass's transcript as a draft. Draft tokens that match
+  what the model would generate are kept from a single pass instead of being
+  generated one by one, and after a differing word decoding finds the draft
+  again, so after audio-stop the final pass mostly checks. A draft only changes
+  how fast the transcript arrives, not what it says (barring floating-point
+  near-ties). Intermediate passes run in the background and are aborted rather
+  than waited for when the audio stops. Post-stop latency is ~17% lower for
+  short commands and ~30% lower from ~7 seconds of audio up
+  - Drafts are used with the merged decoder layout, which the default model
+    has; steps after a mismatch also check where the draft resumes. The split
+    layout decodes every pass without one: its prefill and step graphs round
+    differently, so a draft tipped near-ties there
+  - `--vad-clip` applies to it as well: the final pass skips the silence around
+    the speech, which on short commands cuts the time after audio-stop by
+    10-17%. The VAD runs as the audio arrives, so clipping costs nothing after
+    audio-stop
+  - With `--vad-clip`, the final pass starts when the speaker stops rather than
+    when the audio does: once the silence covers the clip's trailing pad, the
+    clipped audio cannot change unless they speak again, so it is decoded then
+    and audio-stop returns that result. Home Assistant waits for silence of its
+    own before stopping the audio, so short commands usually have their
+    transcript ready by then (0.31 s → 0 s after audio-stop with 0.8 s of
+    trailing silence). If the speaker carries on, the result becomes the next
+    pass's draft
+
 ## 3.9.1
 
 - A custom `--model` advertises all of Whisper's languages again, as it did in

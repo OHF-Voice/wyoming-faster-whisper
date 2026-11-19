@@ -207,7 +207,8 @@ class DispatchEventHandler(AsyncEventHandler):
             # Optionally clip leading/trailing silence before transcription.
             # This operates on the WAV, so any batch transcriber can use it;
             # --vad-clip decides which libraries actually do. Streaming
-            # transcribers never reach this path.
+            # transcribers never reach this path; a streaming backend that
+            # supports --vad-clip applies it in its own session.
             wav_path = self._wav_path
             if self._loader.should_vad_clip(self._language) and await asyncio.to_thread(
                 clip_wav_to_speech,
