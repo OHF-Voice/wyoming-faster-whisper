@@ -96,6 +96,12 @@ class DispatchEventHandler(AsyncEventHandler):
             # started again.
             self._refresh_names()
 
+            if self._language is None:
+                # Transcribe is optional, so a client may send only audio. The
+                # backend is chosen for --language either way; the transcriber
+                # has to be told it too, or it auto-detects.
+                self._language = self._loader.preferred_language
+
             if (self._transcriber is None) and (self._transcriber_future is None):
                 # Load the transcriber in the background.
                 # Hopefully it's ready by the time the audio stops.

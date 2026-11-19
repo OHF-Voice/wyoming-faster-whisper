@@ -127,6 +127,17 @@ class HomeAssistant:
                         await websocket.send_json({"id": next_id(), **payload})
                         msg = await websocket.receive_json()
                         if not msg.get("success"):
+                            error = msg.get("error") or {}
+                            if error.get("code") == "unauthorized":
+                                # The token authenticated, so it is valid; the
+                                # command itself is admin-only (expose_entity/list
+                                # is @require_admin in Home Assistant).
+                                raise HomeAssistantError(
+                                    f"{payload['type']} was refused as unauthorized. "
+                                    "The access token must belong to a Home "
+                                    "Assistant administrator"
+                                )
+
                             raise HomeAssistantError(f"{payload['type']} failed: {msg}")
 
                         return msg

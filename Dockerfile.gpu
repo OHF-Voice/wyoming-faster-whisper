@@ -33,6 +33,9 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 # the last CUDA 12 build). Unpinned, it installs a wheel that wants
 # libcublasLt.so.13 and quietly drops back to the CPU provider on this base.
 ARG ONNXRUNTIME_GPU_VERSION=">=1.19,<1.27"
+#
+# torch is held on the CUDA 12 line for the same reason: 2.14.1 is the last
+# release with a cu126 build (2.15.0 is published for CUDA 13.2 only).
 
 WORKDIR /usr/src
 
@@ -50,7 +53,7 @@ RUN \
         wheel \
     && .venv/bin/pip3 install --no-cache-dir \
         --extra-index-url 'https://download.pytorch.org/whl/cu126' \
-        'torch==2.6.0' \
+        'torch==2.14.1' \
     \
     # Note the -gpu extras: they pull onnxruntime-gpu instead of onnxruntime.
     && .venv/bin/pip3 install --no-cache-dir \
