@@ -89,6 +89,11 @@ def get_parser() -> argparse.ArgumentParser:
         "defaults to float16 on CUDA and to the model's own type on CPU",
     )
     parser.add_argument(
+        "--onnx-quantization",
+        help="Model quantization for onnx-asr (int8, etc.; default: model's "
+        "unquantized weights)",
+    )
+    parser.add_argument(
         "--beam-size",
         type=int,
         default=0,
@@ -293,6 +298,7 @@ async def main() -> None:
         local_files_only=args.local_files_only,
         model=args.model,
         compute_type=args.compute_type,
+        onnx_quantization=args.onnx_quantization,
         device=args.device,
         beam_size=args.beam_size,
         cpu_threads=args.cpu_threads,

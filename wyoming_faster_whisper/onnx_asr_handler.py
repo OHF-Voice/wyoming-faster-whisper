@@ -25,6 +25,7 @@ class OnnxAsrTranscriber(Transcriber):
         cache_dir: Union[str, Path],
         local_files_only: bool,
         device: str = "cpu",
+        quantization: Optional[str] = None,
     ) -> None:
         """Initialize model."""
         warn_if_no_onnx_gpu(device, ort.get_available_providers())
@@ -41,6 +42,7 @@ class OnnxAsrTranscriber(Transcriber):
                 model_id,
                 sess_options=disable_onnx_spinning(ort.SessionOptions()),
                 providers=onnx_providers(device),
+                quantization=quantization,
             )
 
     def transcribe(

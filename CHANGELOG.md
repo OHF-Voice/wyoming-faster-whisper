@@ -11,6 +11,9 @@
   faster-whisper, while 16 would have taken 8% and 60% more than 4 for qwen3-asr
   and sherpa. A Raspberry Pi 5 (four cores, no SMT) still gets 4
 
+- Add `--onnx-quantization` to select quantized onnx-asr model artifacts, such
+  as `int8`, reducing memory use on constrained hosts (#102)
+
 ## 3.9.1
 
 - A custom `--model` advertises all of Whisper's languages again, as it did in
