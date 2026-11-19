@@ -43,6 +43,8 @@
   less memory, but transcribes short commands about 2% slower. Other backends
   are unchanged in speed
 
+- The Docker image is now based on Ubuntu 24.04 instead of Debian bookworm, the
+  same release as the GPU image's CUDA base. Python goes from 3.11 to 3.12
 - Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
   still arriving: all audio so far is decoded again every 2 seconds, each pass
   checking the previous pass's transcript as a draft. Draft tokens that match
