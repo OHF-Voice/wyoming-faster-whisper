@@ -3,7 +3,7 @@
 import importlib
 import sys
 from types import ModuleType
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 
 def test_quantization_is_passed_to_onnx_asr(monkeypatch, tmp_path) -> None:
@@ -13,6 +13,7 @@ def test_quantization_is_passed_to_onnx_asr(monkeypatch, tmp_path) -> None:
     fake_onnxruntime.get_available_providers = Mock(  # type: ignore[attr-defined]
         return_value=["CPUExecutionProvider"]
     )
+    fake_onnxruntime.SessionOptions = Mock  # type: ignore[attr-defined]
     fake_huggingface_hub = ModuleType("huggingface_hub")
     fake_huggingface_hub.snapshot_download = Mock()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "onnx_asr", fake_onnx_asr)
@@ -32,6 +33,7 @@ def test_quantization_is_passed_to_onnx_asr(monkeypatch, tmp_path) -> None:
 
     fake_onnx_asr.load_model.assert_called_once_with(  # type: ignore[attr-defined]
         "nemo-parakeet-tdt-0.6b-v2",
+        sess_options=ANY,
         providers=["CPUExecutionProvider"],
         quantization="int8",
     )

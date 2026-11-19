@@ -9,6 +9,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 from .const import Transcriber
 from .device import is_gpu, torch_device
+from .languages import whisper_language
 
 _RATE = 16000
 
@@ -88,9 +89,12 @@ class TransformersTranscriber(Transcriber):
             )
             generate_args["prompt_ids"] = prompt_ids
 
-        if language:
+        # set_prefix_tokens raises for a code Whisper does not have a token for,
+        # and defers it to generate() below, failing the transcription.
+        whisper_code = whisper_language(language)
+        if whisper_code:
             self.processor.tokenizer.set_prefix_tokens(
-                language=language, task="transcribe"
+                language=whisper_code, task="transcribe"
             )
 
         with torch.no_grad():

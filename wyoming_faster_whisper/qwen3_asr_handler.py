@@ -43,8 +43,8 @@ import onnxruntime as ort
 from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 
-from .const import Transcriber
-from .device import onnx_providers, warn_if_no_onnx_gpu
+from .const import Transcriber, qwen3_asr_language
+from .device import disable_onnx_spinning, onnx_providers, warn_if_no_onnx_gpu
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,55 +96,8 @@ _ALLOW_PATTERNS = [
 _MERGED_DECODER = "decoder_merged.int4.onnx"
 
 # Additive attention mask: 0 where attending is allowed, this where it is not.
-_MASK_BLOCKED = np.finfo(np.float32).min
-
-# Language names the model was trained to accept in the forced-language suffix.
-_LANGUAGE_NAMES = {
-    "ar": "Arabic",
-    "cs": "Czech",
-    "da": "Danish",
-    "de": "German",
-    "el": "Greek",
-    "en": "English",
-    "es": "Spanish",
-    "fa": "Persian",
-    "fi": "Finnish",
-    "fil": "Filipino",
-    "fr": "French",
-    "hi": "Hindi",
-    "hu": "Hungarian",
-    "id": "Indonesian",
-    "it": "Italian",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "mk": "Macedonian",
-    "ms": "Malay",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
-    "sv": "Swedish",
-    "th": "Thai",
-    "tr": "Turkish",
-    "vi": "Vietnamese",
-    "yue": "Cantonese",
-    "zh": "Chinese",
-}
-
-
-def qwen3_asr_language(language: Optional[str]) -> Optional[str]:
-    """Normalize a language code to a Qwen3-ASR language name, or None."""
-    if not language:
-        return None
-
-    code = language.lower()
-    name = _LANGUAGE_NAMES.get(code)
-    if name is None:
-        # Accept locale-style codes like "en-US" or "zh-CN".
-        name = _LANGUAGE_NAMES.get(code.split("-", maxsplit=1)[0])
-
-    return name
+# pylint cannot see finfo's attributes: numpy (2.5 here) ships no Python source for it.
+_MASK_BLOCKED = np.finfo(np.float32).min  # pylint: disable=no-member
 
 
 def _mel_filterbank() -> np.ndarray:
@@ -254,6 +207,7 @@ class Qwen3AsrTranscriber(Transcriber):
         options = ort.SessionOptions()
         options.intra_op_num_threads = cpu_threads
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        disable_onnx_spinning(options)
         # The int4 weights are MatMulNBits nodes. The CUDA provider supports
         # them, but the quantization is where most of this model's speed comes
         # from, so the GPU win here is smaller than for the fp32 backends.

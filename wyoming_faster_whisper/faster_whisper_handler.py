@@ -8,6 +8,7 @@ import faster_whisper
 
 from .const import Transcriber
 from .device import ctranslate2_device
+from .languages import whisper_language
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class FasterWhisperTranscriber(Transcriber):
 
         kwargs = {
             "beam_size": beam_size,
-            "language": language,
+            "language": whisper_language(language),
             "initial_prompt": initial_prompt,
             "vad_filter": self.vad_filter,
             "vad_parameters": self.vad_parameters,

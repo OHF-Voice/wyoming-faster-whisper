@@ -14,7 +14,7 @@ from wyoming.event import Event
 from wyoming.info import Describe, Info
 from wyoming.server import AsyncEventHandler
 
-from .const import StreamingSession, Transcriber
+from .const import AUTO_LANGUAGE, StreamingSession, Transcriber
 from .endpointing import SileroEndpointDetector
 from .models import ModelLoader
 from .vad import clip_wav_to_speech
@@ -96,6 +96,12 @@ class DispatchEventHandler(AsyncEventHandler):
             # started again.
             self._refresh_names()
 
+            if self._language is None:
+                # Transcribe is optional, so a client may send only audio. The
+                # backend is chosen for --language either way; the transcriber
+                # has to be told it too, or it auto-detects.
+                self._language = self._loader.preferred_language
+
             if (self._transcriber is None) and (self._transcriber_future is None):
                 # Load the transcriber in the background.
                 # Hopefully it's ready by the time the audio stops.
@@ -144,7 +150,14 @@ class DispatchEventHandler(AsyncEventHandler):
 
         if Transcribe.is_type(event.type):
             transcribe = Transcribe.from_event(event)
-            self._language = transcribe.language or self._loader.preferred_language
+            language = transcribe.language
+            if language == AUTO_LANGUAGE:
+                # A client can ask for detection by name; every backend spells
+                # that as "no language". Passing "auto" through would make
+                # whisper_language warn on each utterance.
+                language = None
+
+            self._language = language or self._loader.preferred_language
             _LOGGER.debug("Language set to %s", self._language)
 
             return True
