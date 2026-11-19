@@ -9,6 +9,7 @@ import pytest
 from wyoming_faster_whisper.device import (
     ctranslate2_device,
     device_index,
+    disable_onnx_spinning,
     is_gpu,
     onnx_providers,
     resolve_compute_type,
@@ -138,3 +139,26 @@ def test_missing_cuda_provider_warns(caplog) -> None:
     assert not warn_if_no_onnx_gpu("cuda", ["CPUExecutionProvider"])
     assert len(caplog.records) == 1
     assert "onnxruntime-gpu" in caplog.records[0].getMessage()
+
+
+# --- disable_onnx_spinning --------------------------------------------------
+
+
+class _RecordingSessionOptions:
+    """Stand-in for onnxruntime.SessionOptions that records config entries."""
+
+    def __init__(self) -> None:
+        self.entries: dict = {}
+
+    def add_session_config_entry(self, key: str, value: str) -> None:
+        self.entries[key] = value
+
+
+def test_disable_onnx_spinning_turns_off_both_pools() -> None:
+    options = _RecordingSessionOptions()
+
+    assert disable_onnx_spinning(options) is options
+    assert options.entries == {
+        "session.intra_op.allow_spinning": "0",
+        "session.inter_op.allow_spinning": "0",
+    }

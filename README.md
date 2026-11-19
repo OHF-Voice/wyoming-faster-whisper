@@ -68,7 +68,7 @@ Pinning a backend narrows it:
 | `sherpa` | 25 (Parakeet TDT v3) |
 | `sherpa --sherpa-streaming` | `de`, `en`, `es`, `fr` (the published Kroko models) |
 | `funasr` | `en`, `ja`, `ko`, `yue`, `zh`, `zh-CN`, `zh-HK`, `zh-TW` (SenseVoice) |
-| `onnx-asr` | `ru` (GigaAM) |
+| `onnx-asr` | `ru` (GigaAM), `lt` (LT_ausys) |
 
 `--language` is checked against this list at startup, and a region-qualified code
 is accepted everywhere — `en-US` selects the same backend and model as `en`, and
@@ -373,6 +373,7 @@ underscores and a `WYO_WHISPER_` prefix:
 | `--model` | `WYO_WHISPER_MODEL` |
 | `--language` | `WYO_WHISPER_LANGUAGE` |
 | `--stt-library` | `WYO_WHISPER_STT_LIBRARY` |
+| `--onnx-quantization` | `WYO_WHISPER_ONNX_QUANTIZATION` |
 | `--vad-endpointing` | `WYO_WHISPER_VAD_ENDPOINTING` |
 | `--hass-token` | `WYO_WHISPER_HASS_TOKEN` |
 | ...and so on for every option in `--help` | |
