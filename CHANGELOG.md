@@ -80,6 +80,11 @@
   25 clips on onnxruntime 1.22 and 1.32 (CPU) and CUDA, the only other
   difference was one spelling of a name the model does not know
 
+- The README documents the 1.7B `qwen3-asr` model, a community int4 export
+  with the same layout as the default 0.6B, as an option for a desktop CPU or a
+  GPU: about twice the time on a CPU and 1.3 times on a GPU, for transcripts
+  that stay the same across onnxruntime versions and devices
+
 ## 3.9.1
 
 - A custom `--model` advertises all of Whisper's languages again, as it did in
