@@ -23,6 +23,7 @@ from wyoming_faster_whisper.models import (
     guess_model,
     guess_stt_library,
     is_distil_whisper,
+    library_languages,
     vad_clip_enabled,
 )
 
@@ -395,6 +396,18 @@ def test_auto_does_not_report_qwen3_only_languages() -> None:
 )
 def test_explicit_backend_reports_only_its_own_languages(library, expected) -> None:
     assert _languages(library) == expected
+
+
+@pytest.mark.parametrize(
+    "library", [SttLibrary.ONNX_ASR, SttLibrary.FUNASR, SttLibrary.SHERPA]
+)
+def test_custom_model_is_not_narrowed_to_the_default_models_languages(
+    library,
+) -> None:
+    # A custom model can't be inspected, so keep Whisper's list (as in 3.5.0).
+    languages = _languages(library, model="user/korean-ctc-onnx")
+    assert WHISPER_LANGUAGES <= languages
+    assert library_languages(library) <= languages
 
 
 def test_explicit_qwen3_reports_filipino_and_cantonese() -> None:

@@ -141,3 +141,20 @@ def resolve_compute_type(compute_type: str, device: str) -> str:
         return "float16"
 
     return compute_type
+
+
+def disable_onnx_spinning(options: Any) -> Any:
+    """Stop onnxruntime's thread pools from busy-waiting after each run.
+
+    By default the intra-op (and inter-op) pools keep spinning for a while after
+    a call returns, so the threads stay busy for seconds after the transcript is
+    sent. In a voice pipeline the LLM starts on the same cores at exactly that
+    moment, and the spinning slows it down (issue #135). Transcription itself is
+    not affected: the spin only shortens the wake-up between consecutive runs.
+
+    Takes an ``onnxruntime.SessionOptions`` and returns it, so this module still
+    imports without onnxruntime installed.
+    """
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    return options
