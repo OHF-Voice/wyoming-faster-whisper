@@ -44,7 +44,7 @@ from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 
 from .const import Transcriber, qwen3_asr_language
-from .device import onnx_providers, warn_if_no_onnx_gpu
+from .device import disable_onnx_spinning, onnx_providers, warn_if_no_onnx_gpu
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -207,6 +207,7 @@ class Qwen3AsrTranscriber(Transcriber):
         options = ort.SessionOptions()
         options.intra_op_num_threads = cpu_threads
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        disable_onnx_spinning(options)
         # The int4 weights are MatMulNBits nodes. The CUDA provider supports
         # them, but the quantization is where most of this model's speed comes
         # from, so the GPU win here is smaller than for the fp32 backends.

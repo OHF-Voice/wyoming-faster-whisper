@@ -3,12 +3,26 @@ name: Test
 
 on:
   workflow_dispatch:
+  # Called by publish.yml so a release tag is tested before anything ships
+  workflow_call:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.ref }}
+  # Only a newer push to the same pull request makes a run obsolete. Every
+  # commit on main keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build_wheels:
+  test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -23,8 +37,14 @@ jobs:
           python-version: "3.13"
 
       - name: Install
+        id: install
         run: |
           script/setup --dev --transformers --qwen3-asr --hass
 
       - name: Run tests
         run: script/test
+
+      - name: Lint
+        # Report lint even when tests fail, so one run shows both
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: script/lint
