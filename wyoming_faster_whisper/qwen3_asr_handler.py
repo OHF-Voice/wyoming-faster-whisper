@@ -413,14 +413,20 @@ class Qwen3AsrTranscriber(Transcriber):
                 else []
             )
             language_name = qwen3_asr_language(language)
-            suffix = (
-                self._tokenizer.encode(
+            if language_name:
+                suffix = self._tokenizer.encode(
                     f"language {language_name}", add_special_tokens=False
+                ).ids + [_ASR_TEXT]
+            else:
+                # Auto-detect: the answer always opens "language <Name><asr_text>",
+                # so start it with "language" and leave the model only the name.
+                # Left to choose the first token itself, it can tip into
+                # something else on a near-tie, skip the preamble and derail the
+                # whole transcript ("Start a timer for 25 minutes" came out as
+                # "ology" on onnxruntime 1.22 on a CPU).
+                suffix = self._tokenizer.encode(
+                    "language", add_special_tokens=False
                 ).ids
-                + [_ASR_TEXT]
-                if language_name
-                else []
-            )
             # Cache as one list so a single dict lookup covers both.
             cached = [len(context)] + context + suffix
             self._prompt_cache[key] = cached

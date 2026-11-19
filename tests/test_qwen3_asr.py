@@ -81,6 +81,38 @@ def test_forced_language_suffix_goes_after_the_assistant_turn() -> None:
     assert ids[-3] == 198  # newline closing "<|im_start|>assistant\n"
 
 
+class _WordTokenizer:
+    """The real ids for the words these tests use, one token per word."""
+
+    _VOCAB = {"language": 11528, "English": 6364}
+
+    def encode(self, text, add_special_tokens=True):
+        return SimpleNamespace(ids=[self._VOCAB[word] for word in text.split()])
+
+
+def _model_with_word_tokenizer():
+    model = qwen3_asr_handler.Qwen3AsrTranscriber.__new__(
+        qwen3_asr_handler.Qwen3AsrTranscriber
+    )
+    model._tokenizer = _WordTokenizer()
+    model._prompt_cache = {}
+    return model
+
+
+def test_forced_language_suffix_names_the_language() -> None:
+    _, suffix = _model_with_word_tokenizer()._context_ids(None, "en")
+    assert suffix == [11528, 6364, qwen3_asr_handler._ASR_TEXT]
+
+
+def test_auto_language_starts_the_answer_with_language() -> None:
+    # Without a language the answer is still "language <Name><asr_text>...";
+    # starting it leaves the model only the name to pick, so a near-tie on the
+    # first token cannot skip the preamble.
+    context, suffix = _model_with_word_tokenizer()._context_ids(None, None)
+    assert context == []
+    assert suffix == [11528]
+
+
 # --- merged decoder: the cached span ---------------------------------------
 
 

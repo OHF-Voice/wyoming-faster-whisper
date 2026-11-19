@@ -70,6 +70,16 @@
     trailing silence). If the speaker carries on, the result becomes the next
     pass's draft
 
+- `qwen3-asr` without a language no longer risks a nonsense transcript. The
+  answer always opens with the detected language ("language English"), and the
+  model had to pick that first token itself; on a near-tie it could tip into
+  something else, skip the preamble and derail the rest. "Start a timer for 25
+  minutes" came out as "ology" on onnxruntime 1.22 on a CPU. The prompt now
+  starts the answer with "language", leaving only the name to choose. With a
+  language set, as Home Assistant always sends one, nothing changes, and across
+  25 clips on onnxruntime 1.22 and 1.32 (CPU) and CUDA, the only other
+  difference was one spelling of a name the model does not know
+
 ## 3.9.1
 
 - A custom `--model` advertises all of Whisper's languages again, as it did in
