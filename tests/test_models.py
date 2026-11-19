@@ -424,6 +424,7 @@ def _languages(
     model=None,
     *,
     sherpa_streaming=False,
+    qwen3_asr_streaming=False,
     **avail,
 ) -> set:
     """Report what a configuration would advertise, with backends faked."""
@@ -441,6 +442,7 @@ def _languages(
         initial_prompt=None,
         vad_parameters=None,
         sherpa_streaming=sherpa_streaming,
+        qwen3_asr_streaming=qwen3_asr_streaming,
     )
     # _available_backends is memoized, so seeding the cache stands in for
     # whichever extras happen to be installed in the test environment.
@@ -506,6 +508,74 @@ def test_streaming_sherpa_reports_only_the_published_kroko_languages() -> None:
     assert _languages(SttLibrary.FUNASR, sherpa_streaming=True) == (
         SENSE_VOICE_LANGUAGES
     )
+
+
+def test_streaming_qwen3_reports_the_same_languages() -> None:
+    assert _languages(SttLibrary.QWEN3_ASR, qwen3_asr_streaming=True) == (
+        QWEN3_ASR_LANGUAGES
+    )
+
+
+def test_each_streaming_flag_applies_only_to_its_backend() -> None:
+    sherpa = _loader(sherpa_streaming=True)
+    assert sherpa.is_streaming(SttLibrary.SHERPA)
+    assert not sherpa.is_streaming(SttLibrary.QWEN3_ASR)
+
+    qwen3 = _loader(qwen3_asr_streaming=True)
+    assert qwen3.is_streaming(SttLibrary.QWEN3_ASR)
+    assert not qwen3.is_streaming(SttLibrary.SHERPA)
+    assert not qwen3.is_streaming(SttLibrary.FASTER_WHISPER)
+
+
+@pytest.mark.asyncio
+async def test_qwen3_streaming_reaches_the_builder() -> None:
+    loader = _loader(qwen3_asr_streaming=True)
+    loader.preferred_stt_library = SttLibrary.QWEN3_ASR
+    loader._available = dict(_ALL_AVAILABLE)  # noqa: SLF001
+    built: list = []
+
+    def build(stt_library, model, streaming, local_files_only):
+        built.append((stt_library, streaming))
+        return object()
+
+    loader._build_transcriber = build  # type: ignore[method-assign]
+    await loader.load_transcriber("en")
+    assert built == [(SttLibrary.QWEN3_ASR, True)]
+
+
+@pytest.mark.parametrize(
+    ("vad_clip", "libraries", "expected"),
+    [
+        (False, None, False),
+        (True, None, True),
+        (True, {SttLibrary.QWEN3_ASR}, True),
+        (True, {SttLibrary.SHERPA}, False),
+    ],
+)
+def test_vad_clip_reaches_the_qwen3_streaming_session(
+    monkeypatch, vad_clip, libraries, expected
+) -> None:
+    # The dispatcher only clips batch WAVs, so the loader has to hand --vad-clip
+    # to the streaming transcriber itself.
+    handler = pytest.importorskip("wyoming_faster_whisper.qwen3_asr_handler")
+    seen: dict = {}
+    monkeypatch.setattr(
+        handler,
+        "Qwen3AsrStreamingTranscriber",
+        lambda model, **kwargs: seen.update(kwargs),
+    )
+
+    loader = _loader(
+        qwen3_asr_streaming=True,
+        vad_clip=vad_clip,
+        vad_clip_libraries=libraries,
+        vad_clip_pad_ms=250,
+    )
+    loader._build_transcriber(  # noqa: SLF001
+        SttLibrary.QWEN3_ASR, "model", True, local_files_only=True
+    )
+    assert seen["vad_clip"] is expected
+    assert seen["vad_clip_pad_ms"] == 250
 
 
 def test_missing_backend_falls_back_to_the_whisper_list() -> None:
