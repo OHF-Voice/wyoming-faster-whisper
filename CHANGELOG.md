@@ -34,6 +34,15 @@
   - Without the `onnx-asr` extra nothing changes: `lt` keeps falling back to
     faster-whisper. `--stt-library onnx-asr` now reports `lt` as well as `ru`
 
+- Dependency updates: `transformers` 4.52.4 → 5.23.0, `onnx-asr` 0.11.0 →
+  0.12.0, `sherpa-onnx` may now be 2.x, and the Docker images' `torch` 2.6.0 →
+  2.15.0 (CPU) and 2.14.1 (GPU, the last CUDA 12 build). Through
+  `huggingface-hub` 2.x, which `transformers` 5 allows, startup with a cached
+  Hugging Face model is faster: about 0.7 s for faster-whisper. The
+  `transformers` backend also loads about 0.6 s faster and uses about 130 MB
+  less memory, but transcribes short commands about 2% slower. Other backends
+  are unchanged in speed
+
 - Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
   still arriving: all audio so far is decoded again every 2 seconds, each pass
   checking the previous pass's transcript as a draft. Draft tokens that match

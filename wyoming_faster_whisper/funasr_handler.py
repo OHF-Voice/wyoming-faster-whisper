@@ -10,8 +10,12 @@ from typing import Optional, Union
 # importing this module raises ImportError when FunASR is absent. ModelLoader
 # relies on that to detect the backend and fall back to faster-whisper, matching
 # onnx_asr_handler/transformers_whisper.
+#
+# AutoModel comes from its own module rather than the package: recent FunASR
+# releases (1.4.27) export it lazily through a module __getattr__, which pylint
+# cannot follow.
 import numpy as np
-from funasr import AutoModel
+from funasr.auto.auto_model import AutoModel
 from funasr.download.name_maps_from_hub import name_maps_hf
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
 from huggingface_hub import snapshot_download
