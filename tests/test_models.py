@@ -14,6 +14,9 @@ from wyoming_faster_whisper.__main__ import _warn_if_language_unsupported
 from wyoming_faster_whisper.const import (
     GIGAAM_LANGUAGES,
     KROKO_STREAMING_LANGUAGES,
+    LT_AUSYS_LANGUAGES,
+    LT_AUSYS_MODEL,
+    LT_AUSYS_REVISION,
     PARAKEET_LANGUAGES,
     QWEN3_ASR_LANGUAGES,
     SENSE_VOICE_LANGUAGES,
@@ -60,6 +63,7 @@ def _guess(preferred, language, model=None, **avail):
         # Other specialized backends are unaffected.
         ("en", SttLibrary.SHERPA),
         ("ru", SttLibrary.ONNX_ASR),
+        ("lt", SttLibrary.ONNX_ASR),
         # Everything else defaults to faster-whisper.
         ("de", SttLibrary.FASTER_WHISPER),
         (None, SttLibrary.FASTER_WHISPER),
@@ -74,6 +78,24 @@ def test_auto_funasr_languages_fall_back_when_funasr_missing() -> None:
     assert (
         _guess(SttLibrary.AUTO, "zh-CN", has_funasr=False) == SttLibrary.FASTER_WHISPER
     )
+
+
+def test_auto_lithuanian_falls_back_when_onnx_asr_missing() -> None:
+    # lt would route to LT_ausys via onnx-asr, but the extra isn't installed.
+    assert (
+        _guess(SttLibrary.AUTO, "lt", has_onnx_asr=False) == SttLibrary.FASTER_WHISPER
+    )
+
+
+def test_onnx_asr_default_model_is_lt_ausys_for_lithuanian_only() -> None:
+    # The backend's default is GigaAM (Russian); Lithuanian gets LT_ausys.
+    # Keyed on the base language, so a hand-typed "lt-LT" routes the same.
+    assert guess_model(SttLibrary.ONNX_ASR, "lt", is_arm=False) == LT_AUSYS_MODEL
+    assert guess_model(SttLibrary.ONNX_ASR, "lt-LT", is_arm=False) == LT_AUSYS_MODEL
+    for language in ("ru", "en", None):
+        assert (
+            guess_model(SttLibrary.ONNX_ASR, language, is_arm=False) == "gigaam-v2-rnnt"
+        )
 
 
 def test_auto_with_explicit_model_skips_per_language_selection() -> None:
@@ -301,6 +323,40 @@ def test_onnx_quantization_is_forwarded(monkeypatch) -> None:
     assert calls[0][1]["quantization"] == "int8"
 
 
+def _onnx_asr_kwargs(monkeypatch, model: str, **loader_kwargs) -> dict:
+    """Return the keyword arguments the loader gives OnnxAsrTranscriber."""
+    calls = []
+
+    def transcriber(*args, **kwargs):
+        calls.append(kwargs)
+        return "transcriber"
+
+    module = SimpleNamespace(OnnxAsrTranscriber=transcriber)
+    monkeypatch.setitem(sys.modules, "wyoming_faster_whisper.onnx_asr_handler", module)
+    _loader(**loader_kwargs)._build_transcriber(
+        SttLibrary.ONNX_ASR, model, streaming=False, local_files_only=True
+    )
+    return calls[0]
+
+
+def test_lt_ausys_is_pinned_and_loads_int8_on_cpu(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, LT_AUSYS_MODEL)
+    assert kwargs["revision"] == LT_AUSYS_REVISION
+    assert kwargs["quantization"] == "int8"
+
+
+def test_onnx_quantization_overrides_the_lt_ausys_default(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, LT_AUSYS_MODEL, onnx_quantization="fp16")
+    assert kwargs["quantization"] == "fp16"
+    assert kwargs["revision"] == LT_AUSYS_REVISION
+
+
+def test_other_onnx_asr_models_are_not_pinned(monkeypatch) -> None:
+    kwargs = _onnx_asr_kwargs(monkeypatch, "gigaam-v2-rnnt")
+    assert kwargs["revision"] is None
+    assert kwargs["quantization"] is None
+
+
 def _record_attempts(loader: ModelLoader, fail_cached: bool) -> list:
     """Replace backend construction with a recorder of local_files_only values."""
     attempts: list = []
@@ -414,7 +470,7 @@ def test_auto_does_not_report_qwen3_only_languages() -> None:
 @pytest.mark.parametrize(
     ("library", "expected"),
     [
-        (SttLibrary.ONNX_ASR, GIGAAM_LANGUAGES),
+        (SttLibrary.ONNX_ASR, GIGAAM_LANGUAGES | LT_AUSYS_LANGUAGES),
         (SttLibrary.FUNASR, SENSE_VOICE_LANGUAGES),
         (SttLibrary.SHERPA, PARAKEET_LANGUAGES),
         (SttLibrary.QWEN3_ASR, QWEN3_ASR_LANGUAGES),
@@ -489,6 +545,7 @@ def test_auto_with_explicit_model_reports_the_whisper_list() -> None:
         ("EN", SttLibrary.SHERPA),
         ("en_GB", SttLibrary.SHERPA),
         ("ru-RU", SttLibrary.ONNX_ASR),
+        ("lt-LT", SttLibrary.ONNX_ASR),
         # Cantonese must not be flattened to Mandarin on the way through.
         ("zh-HK", SttLibrary.FUNASR),
         ("de-CH", SttLibrary.FASTER_WHISPER),
@@ -555,3 +612,10 @@ def test_unsupported_language_warns(language, caplog) -> None:
 
     assert len(caplog.records) == 1
     assert language in caplog.records[0].getMessage()
+
+
+def test_auto_reports_lithuanian_through_onnx_asr() -> None:
+    # lt is reported either way (Whisper has a token for it); this pins the
+    # explicit backend's list, which now has two default models behind it.
+    assert "lt" in _languages(has_onnx_asr=True)
+    assert _languages(SttLibrary.ONNX_ASR) == GIGAAM_LANGUAGES | LT_AUSYS_LANGUAGES

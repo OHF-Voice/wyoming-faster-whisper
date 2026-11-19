@@ -26,6 +26,7 @@ class OnnxAsrTranscriber(Transcriber):
         local_files_only: bool,
         device: str = "cpu",
         quantization: Optional[str] = None,
+        revision: Optional[str] = None,
     ) -> None:
         """Initialize model."""
         warn_if_no_onnx_gpu(device, ort.get_available_providers())
@@ -34,6 +35,8 @@ class OnnxAsrTranscriber(Transcriber):
         def snapshot_download_with_cache(*args, **kwargs) -> str:
             kwargs["cache_dir"] = str(Path(cache_dir).resolve())
             kwargs["local_files_only"] = local_files_only
+            if revision is not None:
+                kwargs["revision"] = revision
 
             return snapshot_download(*args, **kwargs)
 
