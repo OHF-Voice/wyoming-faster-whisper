@@ -1,6 +1,38 @@
 # Changelog
 
-## 3.9.0
+## 3.10.0
+
+- `--cpu-threads` now defaults to `0`, meaning one thread per physical CPU core
+  this process may use, instead of a fixed 4. Hyperthreads are not counted, as a
+  second thread on the same core slows inference down, and CPU affinity
+  (`taskset`, `docker --cpuset-cpus`) and a cgroup CPU quota (`docker --cpus`)
+  both narrow the count. On an 8-core/16-thread Ryzen 7 5700X, the new default
+  of 8 took 9-20% less time per command than 4 for qwen3-asr, sherpa, and
+  faster-whisper, while 16 would have taken 8% and 60% more than 4 for qwen3-asr
+  and sherpa. A Raspberry Pi 5 (four cores, no SMT) still gets 4
+
+- Add `--onnx-quantization` to select quantized onnx-asr model artifacts, such
+  as `int8`, reducing memory use on constrained hosts (#102)
+
+- Lithuanian is routed to the `onnx-asr` backend when it is installed, the way
+  Russian is routed to GigaAM. The default model for `lt` there is
+  [`RobertasTa/lt-ausys`](https://huggingface.co/RobertasTa/lt-ausys): Datolabs'
+  Upelis (`datolabs/upelis-0.6b-lt-v1`, a Nemotron 0.6B RNN-T fine-tuned on
+  LIEPA-3 and Common Voice, OpenMDW-1.1) exported to ONNX with the Lithuanian
+  language prompt built in
+  - Measured on one Ryzen 7 8845HS (4 threads, greedy, no VAD) against the
+    Lithuanian Whisper fine-tune Paprika (CTranslate2 int8, the files this
+    server runs): FLEURS lt WER **8.32 %** vs 11.97 %, **0.18 s** vs 3.55 s
+    per 2–6 s voice command. Whisper pays a fixed 30-second window per
+    utterance; a transducer processes only the audio it is given
+  - On a CPU the int8 files are loaded (MatMul-only quantization: the same
+    accuracy as fp32 on a 119-command intent exam, 0.7 GB instead of 2.5 GB);
+    a GPU keeps fp32, as the sherpa backend does. `--onnx-quantization`
+    overrides this
+  - The model is pinned to revision `caad00f`, so a later change to that
+    repository reaches users only through a release of this server
+  - Without the `onnx-asr` extra nothing changes: `lt` keeps falling back to
+    faster-whisper. `--stt-library onnx-asr` now reports `lt` as well as `ru`
 
 - Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
   still arriving: all audio so far is decoded again every 2 seconds, each pass
@@ -26,6 +58,38 @@
     transcript ready by then (0.31 s → 0 s after audio-stop with 0.8 s of
     trailing silence). If the speaker carries on, the result becomes the next
     pass's draft
+
+## 3.9.1
+
+- A custom `--model` advertises all of Whisper's languages again, as it did in
+  3.5.0. Since 3.9.0 it was given the language list of its backend's *default*
+  model, which says nothing about a model the server cannot inspect without
+  downloading it: a custom `onnx-asr` model was advertised as Russian only
+  (GigaAM's list), and custom `sherpa` and `funasr` models were narrowed the
+  same way. Home Assistant then would not offer the model to a pipeline in its
+  own language, for example a Korean onnx-asr model to a Korean pipeline
+  (#148). Default models and `.en` checkpoints still advertise exactly what they
+  support
+
+- The `onnx-asr` and `qwen3-asr` backends no longer keep CPU cores busy after a
+  transcript is sent. onnxruntime's thread pools spin while waiting for more
+  work by default, which slows down whatever starts on the same cores next,
+  such as an LLM answering the command (#135). With onnx-asr's Parakeet on a
+  desktop CPU, each transcript left about half a core-second of spinning in the
+  second after it; that is now zero. onnx-asr transcribes no slower, and
+  qwen3-asr, which runs its decoder once per token, about 2% slower
+  - The `sherpa` backend still spins: sherpa-onnx creates its onnxruntime
+    sessions itself and does not expose the setting
+
+- The `funasr` extra now installs kaldi-native-fbank. FunASR computes
+  SenseVoice's features with torchaudio or, in recent releases,
+  kaldi-native-fbank, but declares neither, so an install with torch and
+  without torchaudio (for example alongside the `transformers` extra) failed
+  every SenseVoice transcription with `ImportError`. torch itself still has to
+  be installed separately. The Home Assistant app and the Docker image were not
+  affected
+
+## 3.9.0
 
 - The languages reported to Home Assistant now follow the backend that will
   actually run, instead of always being Whisper's 100 codes. Backends are

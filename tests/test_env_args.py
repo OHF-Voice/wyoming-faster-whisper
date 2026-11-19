@@ -28,6 +28,7 @@ def test_no_env_vars() -> None:
     assert args.uri == "tcp://0.0.0.0:10300"
     assert args.data_dir == ["/data"]
     assert args.device == "cpu"
+    assert args.onnx_quantization is None
     assert args.beam_size == 0
     assert not args.debug
 
@@ -51,6 +52,11 @@ def test_command_line_wins() -> None:
     """An explicit argument is never shadowed by the environment."""
     args = run(BASE_ARGS + ["--device", "cuda"], WYO_WHISPER_DEVICE="cpu")
     assert args.device == "cuda"
+
+
+def test_onnx_quantization_from_env() -> None:
+    args = run(WYO_WHISPER_ONNX_QUANTIZATION="int8")
+    assert args.onnx_quantization == "int8"
 
 
 def test_type_conversion() -> None:

@@ -11,7 +11,7 @@ import onnxruntime as ort
 from huggingface_hub import snapshot_download
 
 from .const import Transcriber
-from .device import onnx_providers, warn_if_no_onnx_gpu
+from .device import disable_onnx_spinning, onnx_providers, warn_if_no_onnx_gpu
 
 _RATE = 16000
 
@@ -25,6 +25,8 @@ class OnnxAsrTranscriber(Transcriber):
         cache_dir: Union[str, Path],
         local_files_only: bool,
         device: str = "cpu",
+        quantization: Optional[str] = None,
+        revision: Optional[str] = None,
     ) -> None:
         """Initialize model."""
         warn_if_no_onnx_gpu(device, ort.get_available_providers())
@@ -33,12 +35,17 @@ class OnnxAsrTranscriber(Transcriber):
         def snapshot_download_with_cache(*args, **kwargs) -> str:
             kwargs["cache_dir"] = str(Path(cache_dir).resolve())
             kwargs["local_files_only"] = local_files_only
+            if revision is not None:
+                kwargs["revision"] = revision
 
             return snapshot_download(*args, **kwargs)
 
         with patch("huggingface_hub.snapshot_download", snapshot_download_with_cache):
             self.onnx_model = onnx_asr.load_model(
-                model_id, providers=onnx_providers(device)
+                model_id,
+                sess_options=disable_onnx_spinning(ort.SessionOptions()),
+                providers=onnx_providers(device),
+                quantization=quantization,
             )
 
     def transcribe(
