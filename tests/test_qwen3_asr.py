@@ -219,6 +219,37 @@ def test_split_decoder_is_used_when_merged_is_absent(tmp_path, stub_runtime) -> 
     assert model._decoder_step is not None
 
 
+def test_split_layout_decodes_without_the_draft(
+    tmp_path, stub_runtime, monkeypatch
+) -> None:
+    # Its prefill and step graphs round differently, so a draft could tip
+    # near-ties; the split layout always decodes from scratch.
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=False)), str(tmp_path)
+    )
+    monkeypatch.setattr(
+        qwen3_asr_handler,
+        "_log_mel_spectrogram",
+        lambda audio, filters: np.zeros((1, 128, 4), dtype=np.float32),
+    )
+    model._encoder = SimpleNamespace(
+        run=lambda *args: [np.zeros((1, 2, 8), dtype=np.float32)]
+    )
+    monkeypatch.setattr(model, "_context_ids", lambda prompt, language: ([], []))
+    monkeypatch.setattr(model, "_build_prompt_ids", lambda *args: [1, 2, 3])
+    drafts = []
+
+    def generate(features, prompt_ids, draft, run_options=None):
+        drafts.append(list(draft))
+        return [7]
+
+    monkeypatch.setattr(model, "_generate", generate)
+
+    tokens = model.decode_tokens(np.zeros(1600, dtype=np.float32), "en", draft=[4, 5])
+    assert tokens == [7]
+    assert drafts == [[]]
+
+
 def test_empty_kv_is_shaped_from_the_graph(tmp_path, stub_runtime) -> None:
     # Taken from present_keys so the cache does not depend on config.json.
     model = qwen3_asr_handler.Qwen3AsrTranscriber(

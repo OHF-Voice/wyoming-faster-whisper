@@ -53,8 +53,10 @@
   near-ties). Intermediate passes run in the background and are aborted rather
   than waited for when the audio stops. Post-stop latency is ~17% lower for
   short commands and ~30% lower from ~7 seconds of audio up
-  - Draft checking works with both decoder layouts; with the merged one, steps
-    after a mismatch also check where the draft resumes
+  - Drafts are used with the merged decoder layout, which the default model
+    has; steps after a mismatch also check where the draft resumes. The split
+    layout decodes every pass without one: its prefill and step graphs round
+    differently, so a draft tipped near-ties there
   - `--vad-clip` applies to it as well: the final pass skips the silence around
     the speech, which on short commands cuts the time after audio-stop by
     10-17%. The VAD runs as the audio arrives, so clipping costs nothing after

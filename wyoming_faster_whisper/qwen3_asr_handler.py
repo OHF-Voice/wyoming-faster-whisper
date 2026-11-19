@@ -618,7 +618,8 @@ class Qwen3AsrTranscriber(Transcriber):
         audio). It does not change the result, only how fast it arrives: the
         draft is checked in the same single pass that reads the prompt, every
         token of it that matches greedy decoding is kept without a decoder step
-        of its own, and decoding carries on from the first mismatch.
+        of its own, and decoding carries on from the first mismatch. The split
+        decoder layout ignores it (see below).
 
         Setting ``run_options.terminate`` from another thread aborts the decode
         with an exception at the next graph node.
@@ -647,7 +648,13 @@ class Qwen3AsrTranscriber(Transcriber):
                 run_options,
             )
 
-        return self._generate(audio_features, prompt_ids, draft, run_options)
+        # No draft on the split layout. It would be checked in decoder_init but
+        # generated in decoder_step, two graphs that round differently, so there
+        # a draft tipped near-ties far more often than on the merged layout: 13
+        # of 260 test decodes, one of them with a draft identical to the
+        # result. The split layout also gets none of the multi-token steps that
+        # make drafts pay off.
+        return self._generate(audio_features, prompt_ids, (), run_options)
 
     def tokens_to_text(self, tokens: Sequence[int]) -> str:
         """Turn the assistant turn into the transcript."""

@@ -75,7 +75,11 @@ class StreamingSpeechClipper:
     process() runs the VAD on each piece as it arrives, so clipping the whole
     utterance at the end is only a slice: no model work is left for after the
     audio stops. clip() gives the same result clip_to_speech() would have given
-    for everything passed to process(). Not thread-safe.
+    for everything passed to process(), with one exception: when the audio is an
+    exact multiple of the VAD window long, pysilero-vad's process_chunks() (which
+    clip_to_speech() uses) skips the last window and process() does not, so with
+    speech near the end the clip can be one window (32 ms) longer. Not
+    thread-safe.
     """
 
     def __init__(self, threshold: float = 0.5, pad_ms: int = 400) -> None:
