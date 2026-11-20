@@ -22,7 +22,7 @@ from .const import (
     base_language,
     sense_voice_language,
 )
-from .device import is_gpu, resolve_compute_type
+from .device import is_gpu, is_vulkan, resolve_compute_type
 from .faster_whisper_handler import FasterWhisperTranscriber
 from .languages import WHISPER_LANGUAGES
 
@@ -249,6 +249,19 @@ class ModelLoader:
             transcriber = self._transcriber.get(key)
             if transcriber is not None:
                 return transcriber
+
+            if is_vulkan(self.device) and (stt_library != SttLibrary.QWEN3_ASR):
+                # The backend itself would say nothing: CTranslate2 and torch
+                # get "cpu" from device.py, and sherpa never sees "vulkan".
+                # Under --stt-library auto this is the first sign that a
+                # language went to a backend other than qwen3-asr.
+                _LOGGER.warning(
+                    "--device %s only accelerates qwen3-asr; %s (model %s) will "
+                    "run on the CPU",
+                    self.device,
+                    stt_library.value,
+                    model,
+                )
 
             transcriber = self._load_cache_first(stt_library, model, streaming)
             self._transcriber[key] = transcriber

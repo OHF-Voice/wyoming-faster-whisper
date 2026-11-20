@@ -299,6 +299,145 @@ def test_prefix_cache_starts_empty(tmp_path, stub_runtime) -> None:
     assert model._prefix_kv is None
 
 
+def test_kv_stays_in_numpy_on_the_cpu(tmp_path, stub_runtime) -> None:
+    # Device-resident KV (IOBinding) is for Vulkan only.
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path)
+    )
+    assert model._kv_memory is None
+
+
+class _FakeWebGpuDevice:
+    """Stands in for the OrtEpDevice onnx_session_args returns on Vulkan."""
+
+    def memory_info(self, memory_type):
+        return "webgpu-memory"
+
+
+def _webgpu_session_args(ort, options, device):
+    if device == "vulkan":
+        return {"sess_options": "webgpu"}, _FakeWebGpuDevice()
+    return {"sess_options": options, "providers": ["CPUExecutionProvider"]}, None
+
+
+def test_vulkan_without_an_adapter_falls_back_to_the_cpu(
+    tmp_path, stub_runtime, monkeypatch, caplog
+) -> None:
+    # In a container without /dev/dri, onnxruntime still lists a WebGPU device
+    # but creating the session fails ("No supported adapters").
+    class FailingOnWebGpu(_FakeSession):
+        def __init__(self, path, **kwargs) -> None:
+            if kwargs.get("sess_options") == "webgpu":
+                raise RuntimeError("Failed to get a WebGPU adapter")
+            super().__init__(path, **kwargs)
+
+    warm_ups = []
+    monkeypatch.setattr(qwen3_asr_handler, "onnx_session_args", _webgpu_session_args)
+    monkeypatch.setattr(qwen3_asr_handler.ort, "InferenceSession", FailingOnWebGpu)
+    monkeypatch.setattr(
+        qwen3_asr_handler.Qwen3AsrTranscriber,
+        "_warm_up",
+        lambda self: warm_ups.append(1),
+    )
+
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path), device="vulkan"
+    )
+
+    assert model._encoder.get_providers() == ["CPUExecutionProvider"]
+    assert model._merged.get_providers() == ["CPUExecutionProvider"]
+    assert model._kv_memory is None
+    assert not warm_ups  # nothing to warm up on the CPU
+    # Said once: not again by the CUDA check that follows.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "running on the CPU" in warnings[0].getMessage()
+
+
+def test_vulkan_keeps_the_kv_cache_on_the_gpu_and_warms_up(
+    tmp_path, stub_runtime, monkeypatch
+) -> None:
+    warm_ups = []
+    monkeypatch.setattr(qwen3_asr_handler, "onnx_session_args", _webgpu_session_args)
+    monkeypatch.setattr(
+        qwen3_asr_handler.Qwen3AsrTranscriber,
+        "_warm_up",
+        lambda self: warm_ups.append(1),
+    )
+
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path), device="vulkan"
+    )
+
+    assert model._kv_memory == "webgpu-memory"
+    # The first real command would otherwise pay for building GPU pipelines.
+    assert warm_ups == [1]
+
+
+def test_warm_up_decodes_a_second_of_silence(
+    tmp_path, stub_runtime, monkeypatch
+) -> None:
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path)
+    )
+    calls = []
+    monkeypatch.setattr(
+        model, "decode_tokens", lambda audio, language: calls.append((audio, language))
+    )
+
+    model._warm_up()
+
+    ((audio, language),) = calls
+    assert audio.shape == (qwen3_asr_handler._RATE,)
+    assert not audio.any()
+    assert language is None
+
+
+def test_cpu_session_errors_are_not_swallowed(
+    tmp_path, stub_runtime, monkeypatch
+) -> None:
+    class Failing(_FakeSession):
+        def __init__(self, path, **kwargs) -> None:
+            raise RuntimeError("corrupt model")
+
+    monkeypatch.setattr(qwen3_asr_handler.ort, "InferenceSession", Failing)
+    with pytest.raises(RuntimeError, match="corrupt model"):
+        qwen3_asr_handler.Qwen3AsrTranscriber(
+            str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path)
+        )
+
+
+# --- KV cache helpers ---------------------------------------------------------
+
+
+def _kv(seq: int) -> np.ndarray:
+    return np.arange(2 * 1 * 3 * seq * 4, dtype=np.float32).reshape(2, 1, 3, seq, 4)
+
+
+def test_kv_shape_of_numpy_and_ortvalue() -> None:
+    kv = _kv(5)
+    assert qwen3_asr_handler._kv_shape(kv) == (2, 1, 3, 5, 4)
+    value = qwen3_asr_handler.ort.OrtValue.ortvalue_from_numpy(kv)
+    assert qwen3_asr_handler._kv_shape(value) == (2, 1, 3, 5, 4)
+
+
+def test_trim_kv_cuts_the_sequence_axis() -> None:
+    kv = _kv(5)
+    trimmed = qwen3_asr_handler._trim_kv(kv, 3)
+    assert trimmed.shape == (2, 1, 3, 3, 4)
+    assert trimmed.flags["C_CONTIGUOUS"]
+    np.testing.assert_array_equal(trimmed, kv[:, :, :, :3])
+
+
+def test_trim_kv_brings_an_ortvalue_back_to_numpy() -> None:
+    # A KV cache left in GPU memory (Vulkan) is an OrtValue, not an array.
+    kv = _kv(5)
+    value = qwen3_asr_handler.ort.OrtValue.ortvalue_from_numpy(kv)
+    trimmed = qwen3_asr_handler._trim_kv(value, 2)
+    assert isinstance(trimmed, np.ndarray)
+    np.testing.assert_array_equal(trimmed, kv[:, :, :, :2])
+
+
 def test_allow_patterns_cover_both_decoder_layouts() -> None:
     patterns = set(qwen3_asr_handler._ALLOW_PATTERNS)
     assert qwen3_asr_handler._MERGED_DECODER in patterns

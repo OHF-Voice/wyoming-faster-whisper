@@ -457,6 +457,49 @@ install the same `onnxruntime` module and whichever lands second wins, silently,
 since the CPU provider still loads every model. Reinstall `onnxruntime-gpu`
 last. `Dockerfile.gpu` does exactly this and is the working reference.
 
+### Vulkan (AMD, Intel) for qwen3-asr
+
+`qwen3-asr` can run on any GPU with a Vulkan driver, including AMD and Intel
+GPUs that the CUDA image cannot use. It goes through onnxruntime's WebGPU
+execution provider, a plugin that loads into the regular `onnxruntime` package:
+
+``` sh
+pip install 'wyoming-faster-whisper[qwen3_asr_vulkan]'
+python3 -m wyoming_faster_whisper --stt-library qwen3-asr --device vulkan ...
+```
+
+The host needs a Vulkan driver and `libvulkan.so.1` (on Debian/Ubuntu,
+`mesa-vulkan-drivers` and `libvulkan1`). `--device vulkan:N` picks an adapter
+from `vulkaninfo --summary`.
+
+The regular Docker image already includes both. Pass the GPU in:
+
+``` sh
+docker run -it -p 10300:10300 -v /path/to/local/data:/data \
+    --device /dev/dri \
+    -e WYO_WHISPER_DEVICE=vulkan \
+    rhasspy/wyoming-whisper --stt-library qwen3-asr --language en
+```
+
+- With `--user`, also add the group that owns `/dev/dri/renderD*`, e.g.
+  `--group-add $(getent group render | cut -d: -f3)`.
+- Without a usable GPU, the server logs a warning and runs on the CPU.
+- Other backends run on the CPU under `--device vulkan`, with a warning.
+- Mesa version matters: the image's Mesa 26.2 (Ubuntu 26.10) is about 1.5x
+  faster than Mesa 25.2 or 26.0.
+
+Per voice command on a Radeon RX 580, against 4 CPU threads of a Ryzen 7 5700X:
+
+| Model | Prompt | CPU | Vulkan |
+| --- | --- | --- | --- |
+| 0.6B | none | 480 ms | 293 ms |
+| 0.6B | 50 names | 602 ms | 353 ms |
+| 1.7B | none | 905 ms | 414 ms |
+| 1.7B | 50 names | 1073 ms | 471 ms |
+
+With `--qwen3-asr-streaming`, from the end of the audio to the transcript:
+0.6B 378 → 174 ms, 1.7B 706 → 255 ms.
+
 ## Environment Variables
 
 Every command-line option can also be set from the environment, which is what
