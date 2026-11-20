@@ -34,6 +34,7 @@ onnx_asr_handler/funasr_handler.
 import json
 import logging
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -44,7 +45,7 @@ from huggingface_hub import snapshot_download
 from tokenizers import Tokenizer
 
 from .const import StreamingSession, Transcriber, qwen3_asr_language
-from .device import disable_onnx_spinning, onnx_providers, warn_if_no_onnx_gpu
+from .device import disable_onnx_spinning, onnx_session_args, warn_if_no_onnx_gpu
 from .vad import StreamingSpeechClipper
 
 _LOGGER = logging.getLogger(__name__)
@@ -227,12 +228,34 @@ def _draft_continuation(
     return [], cursor
 
 
+# A KV cache tensor: [layers, batch, kv_heads, seq, head_dim]. A numpy array on
+# the CPU, or an OrtValue left in GPU memory between decoder steps (Vulkan).
+KvCache = Union[np.ndarray, ort.OrtValue]
+
+
+def _kv_shape(kv: KvCache) -> Tuple[int, ...]:
+    """The shape of a KV cache tensor, wherever it lives."""
+    if isinstance(kv, np.ndarray):
+        return tuple(kv.shape)
+    return tuple(kv.shape())
+
+
+def _trim_kv(kv: KvCache, length: int) -> np.ndarray:
+    """Cut a KV cache back to its first ``length`` positions.
+
+    A cache in GPU memory comes back to the host for this; it only happens
+    after a rejected draft token, and the next step uploads it again.
+    """
+    host = kv if isinstance(kv, np.ndarray) else kv.numpy()
+    return np.ascontiguousarray(host[:, :, :, :length])
+
+
 def _continue_greedy(
     logits: np.ndarray,
     draft: Sequence[int],
     n_prompt: int,
-    past_keys: np.ndarray,
-    past_values: np.ndarray,
+    past_keys: KvCache,
+    past_values: KvCache,
     step,
     multi_token_steps: bool,
 ) -> List[int]:
@@ -254,8 +277,8 @@ def _continue_greedy(
 
     position = n_prompt + accepted
     if accepted < len(draft):
-        past_keys = np.ascontiguousarray(past_keys[:, :, :, :position])
-        past_values = np.ascontiguousarray(past_values[:, :, :, :position])
+        past_keys = _trim_kv(past_keys, position)
+        past_values = _trim_kv(past_values, position)
 
     cursor = accepted
     while (tokens[-1] not in _EOS_IDS) and (len(tokens) < _MAX_NEW_TOKENS):
@@ -277,8 +300,8 @@ def _continue_greedy(
             cursor = start + accepted
         position += 1 + accepted
         if accepted < len(guess):
-            past_keys = np.ascontiguousarray(past_keys[:, :, :, :position])
-            past_values = np.ascontiguousarray(past_values[:, :, :, :position])
+            past_keys = _trim_kv(past_keys, position)
+            past_values = _trim_kv(past_values, position)
 
     if draft:
         _LOGGER.debug("Draft: %s of %s token(s) accepted", total_accepted, len(draft))
@@ -325,25 +348,52 @@ class Qwen3AsrTranscriber(Transcriber):
                 )
             )
 
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = cpu_threads
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        disable_onnx_spinning(options)
-        # The int4 weights are MatMulNBits nodes. The CUDA provider supports
-        # them, but the quantization is where most of this model's speed comes
-        # from, so the GPU win here is smaller than for the fp32 backends.
-        session_args = {
-            "sess_options": options,
-            "providers": onnx_providers(device),
-        }
+        def session_options() -> ort.SessionOptions:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = cpu_threads
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            return disable_onnx_spinning(options)
 
-        self._encoder = ort.InferenceSession(
-            str(model_dir / "encoder.int4.onnx"), **session_args
-        )
+        # The int4 weights are MatMulNBits nodes. The CUDA and WebGPU (Vulkan)
+        # providers both support them, but the quantization is where most of
+        # this model's speed comes from, so the GPU win here is smaller than for
+        # the fp32 backends.
+        # webgpu_device is None unless the sessions are going on Vulkan; when
+        # Vulkan was asked for but cannot be used, it has already said why.
+        session_args, webgpu_device = onnx_session_args(ort, session_options(), device)
+        encoder_path = str(model_dir / "encoder.int4.onnx")
+
+        try:
+            self._encoder = ort.InferenceSession(encoder_path, **session_args)
+        except Exception:  # pylint: disable=broad-exception-caught
+            if webgpu_device is None:
+                raise
+
+            # onnxruntime lists a WebGPU device for any GPU it sees on the PCI
+            # bus, but Dawn only finds an adapter when the driver can open it:
+            # in a container without --device /dev/dri, the session itself
+            # fails. Run on the CPU rather than not at all.
+            _LOGGER.warning(
+                "Could not start Vulkan (WebGPU) for '%s', running on the CPU. "
+                "In a container, pass the GPU in with --device /dev/dri",
+                device,
+                exc_info=_LOGGER.isEnabledFor(logging.DEBUG),
+            )
+            session_args, webgpu_device = onnx_session_args(
+                ort, session_options(), "cpu"
+            )
+            self._encoder = ort.InferenceSession(encoder_path, **session_args)
 
         # Ask the session that was actually created, not onnxruntime's advertised
         # provider list: a CUDA provider that fails to load is still advertised.
         warn_if_no_onnx_gpu(device, self._encoder.get_providers())
+
+        # On Vulkan the merged decoder's KV cache stays in GPU memory between
+        # steps instead of going to numpy and back on every token, which takes
+        # a 1.7B decode step from 40 to 26 ms on an RX 580.
+        self._kv_memory: Optional[ort.OrtMemoryInfo] = None
+        if webgpu_device is not None:
+            self._kv_memory = webgpu_device.memory_info(ort.OrtDeviceMemoryType.DEFAULT)
 
         self._merged: Optional[ort.InferenceSession] = None
         self._decoder_init: Optional[ort.InferenceSession] = None
@@ -380,7 +430,7 @@ class Qwen3AsrTranscriber(Transcriber):
         # cost far more memory than it could ever save.
         self._prefix_lock = threading.Lock()
         self._prefix_key: Optional[Tuple[int, ...]] = None
-        self._prefix_kv: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._prefix_kv: Optional[Tuple[KvCache, KvCache]] = None
 
         with open(model_dir / "config.json", "r", encoding="utf-8") as config_file:
             config = json.load(config_file)
@@ -396,6 +446,21 @@ class Qwen3AsrTranscriber(Transcriber):
         self._mel_filters = _mel_filterbank()
         self._encoder_inputs = [inp.name for inp in self._encoder.get_inputs()]
         self._prompt_cache: Dict[Tuple[str, Optional[str]], List[int]] = {}
+
+        if webgpu_device is not None:
+            self._warm_up()
+
+    def _warm_up(self) -> None:
+        """Decode a second of silence, so the first real command is not slower.
+
+        WebGPU builds its compute pipelines on first use, which added 145 ms
+        (0.6B) and 190 ms (1.7B) to the first transcription after loading on an
+        RX 580. Done here, that cost lands on startup instead of on whoever
+        speaks first.
+        """
+        start = time.perf_counter()
+        self.decode_tokens(np.zeros(_RATE, dtype=np.float32), language=None)
+        _LOGGER.debug("Vulkan warm-up took %.2fs", time.perf_counter() - start)
 
     def count_prompt_tokens(self, text: str) -> Optional[int]:
         return len(self._tokenizer.encode(text, add_special_tokens=False).ids)
@@ -458,29 +523,63 @@ class Qwen3AsrTranscriber(Transcriber):
         self,
         input_embeds: np.ndarray,
         positions: Union[Sequence[int], np.ndarray],
-        past_keys: np.ndarray,
-        past_values: np.ndarray,
+        past_keys: KvCache,
+        past_values: KvCache,
         run_options: Optional[ort.RunOptions] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """One pass of the merged decoder over ``input_embeds``."""
+    ) -> Tuple[np.ndarray, KvCache, KvCache]:
+        """One pass of the merged decoder over ``input_embeds``.
+
+        The past KV may be numpy or (on Vulkan) an OrtValue in GPU memory; on
+        Vulkan the present KV is returned in GPU memory too.
+        """
         assert self._merged is not None
-        return self._merged.run(
-            ["logits", "present_keys", "present_values"],
-            {
-                "input_embeds": input_embeds,
-                "position_ids": np.asarray(positions, dtype=np.int64)[np.newaxis, :],
-                "attention_mask": _causal_mask(
-                    input_embeds.shape[1], past_keys.shape[3]
-                ),
-                "past_keys": past_keys,
-                "past_values": past_values,
-            },
-            run_options,
+        kv_shape = _kv_shape(past_keys)
+        q_len = input_embeds.shape[1]
+        feeds = {
+            "input_embeds": input_embeds,
+            "position_ids": np.asarray(positions, dtype=np.int64)[np.newaxis, :],
+            "attention_mask": _causal_mask(q_len, kv_shape[3]),
+        }
+
+        if self._kv_memory is None:
+            assert isinstance(past_keys, np.ndarray)
+            assert isinstance(past_values, np.ndarray)
+            return self._merged.run(
+                ["logits", "present_keys", "present_values"],
+                {**feeds, "past_keys": past_keys, "past_values": past_values},
+                run_options,
+            )
+
+        binding = self._merged.io_binding()
+        for name, value in feeds.items():
+            binding.bind_cpu_input(name, value)
+
+        for name, past in (("past_keys", past_keys), ("past_values", past_values)):
+            if isinstance(past, np.ndarray):
+                binding.bind_cpu_input(name, past)
+            else:
+                binding.bind_ortvalue_input(name, past)
+
+        # The present KV's shape is known up front (past + q_len positions), so
+        # it can be allocated in GPU memory and bound before the run.
+        present_shape = list(kv_shape)
+        present_shape[3] += q_len
+        present_keys, present_values = (
+            ort.OrtValue.ortvalue_from_shape_and_type(
+                present_shape, np.float32, memory_info=self._kv_memory
+            )
+            for _ in range(2)
         )
+        binding.bind_output("logits")
+        binding.bind_ortvalue_output("present_keys", present_keys)
+        binding.bind_ortvalue_output("present_values", present_values)
+
+        self._merged.run_with_iobinding(binding, run_options)
+        return binding.get_outputs()[0].numpy(), present_keys, present_values
 
     def _prefix_cache(
         self, system_ids: List[int], run_options: Optional[ort.RunOptions] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[KvCache, KvCache]:
         """KV for the system turn, computed once and reused while it is unchanged."""
         key = tuple(system_ids)
         with self._prefix_lock:
@@ -534,9 +633,7 @@ class Qwen3AsrTranscriber(Transcriber):
             run_options,
         )
 
-        def step(
-            tokens: List[int], position: int, keys: np.ndarray, values: np.ndarray
-        ):
+        def step(tokens: List[int], position: int, keys: KvCache, values: KvCache):
             return self._run_merged(
                 self._embed_tokens[tokens].astype(np.float32)[np.newaxis, :, :],
                 np.arange(position, position + len(tokens)),

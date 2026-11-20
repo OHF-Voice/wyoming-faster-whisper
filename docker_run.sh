@@ -5,7 +5,9 @@ cd /usr/src
 # var is set, so `docker run -e WYO_WHISPER_URI=...` is not fighting an argument
 # that would always win over it.
 #
-# STT_DEVICE is set to "cuda" by Dockerfile.gpu and unset in the CPU image.
+# STT_DEVICE is set to "cuda" by Dockerfile.gpu and unset in the CPU image,
+# which also accepts WYO_WHISPER_DEVICE=vulkan for qwen3-asr on a GPU (with
+# `docker run --device /dev/dri`).
 defaults=()
 [ -n "${WYO_WHISPER_URI}${WYO_WHISPER_URI_FILE}" ] ||
     defaults+=(--uri 'tcp://0.0.0.0:10300')

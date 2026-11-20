@@ -110,6 +110,15 @@ qwen3_asr_gpu = [
     "onnxruntime-gpu>=1.19,<1.27",
     "tokenizers>=0.20",
 ]
+# Vulkan (AMD/Intel/NVIDIA via Mesa or vendor drivers) for qwen3-asr, through
+# onnxruntime's WebGPU execution provider. Unlike onnxruntime-gpu this is a
+# plugin that loads into the stock onnxruntime, so it coexists with the CPU
+# package that faster-whisper pulls in. Needs a system libvulkan.so.1.
+qwen3_asr_vulkan = [
+    "onnxruntime>=1.24.4",
+    "onnxruntime-ep-webgpu>=0.6.0",
+    "tokenizers>=0.20",
+]
 hass = [
     "aiohttp>=3.8,<4",
 ]

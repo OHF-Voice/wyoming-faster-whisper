@@ -285,14 +285,16 @@ def test_every_default_model_takes_a_prompt() -> None:
 def _loader(**kwargs) -> ModelLoader:
     """Build a ModelLoader with the arguments the cache-first path cares about."""
     return ModelLoader(
-        preferred_stt_library=SttLibrary.FASTER_WHISPER,
+        preferred_stt_library=kwargs.pop(
+            "preferred_stt_library", SttLibrary.FASTER_WHISPER
+        ),
         preferred_language="en",
         download_dir="/data",
         local_files_only=kwargs.pop("local_files_only", False),
         model="Systran/faster-whisper-base",
         compute_type="default",
         onnx_quantization=kwargs.pop("onnx_quantization", None),
-        device="cpu",
+        device=kwargs.pop("device", "cpu"),
         beam_size=5,
         cpu_threads=4,
         initial_prompt=None,
@@ -689,3 +691,50 @@ def test_auto_reports_lithuanian_through_onnx_asr() -> None:
     # explicit backend's list, which now has two default models behind it.
     assert "lt" in _languages(has_onnx_asr=True)
     assert _languages(SttLibrary.ONNX_ASR) == GIGAAM_LANGUAGES | LT_AUSYS_LANGUAGES
+
+
+# --- Vulkan -----------------------------------------------------------------
+
+_BACKEND_FLAGS = (
+    "has_transformers",
+    "has_sherpa",
+    "has_onnx_asr",
+    "has_funasr",
+    "has_qwen3_asr",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_cannot_use_vulkan_is_warned_about(caplog) -> None:
+    # Only qwen3-asr runs on Vulkan. faster-whisper gets "cpu" from device.py
+    # and would say nothing itself, so the loader does.
+    loader = _loader(device="vulkan")
+    _record_attempts(loader, fail_cached=False)
+
+    await loader.load_transcriber()
+    await loader.load_transcriber()  # cached: no second warning
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "faster-whisper" in warnings[0]
+    assert "CPU" in warnings[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("library", "device"),
+    [(SttLibrary.QWEN3_ASR, "vulkan"), (SttLibrary.FASTER_WHISPER, "cpu")],
+)
+async def test_no_vulkan_warning_when_it_is_used_or_not_asked_for(
+    caplog, monkeypatch, library, device
+) -> None:
+    loader = _loader(preferred_stt_library=library, device=device)
+    # Pretend every backend is installed, so qwen3-asr is not swapped out.
+    monkeypatch.setattr(
+        loader, "_available_backends", lambda: dict.fromkeys(_BACKEND_FLAGS, True)
+    )
+    _record_attempts(loader, fail_cached=False)
+
+    await loader.load_transcriber()
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]

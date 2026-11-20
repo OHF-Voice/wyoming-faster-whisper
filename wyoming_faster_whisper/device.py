@@ -6,13 +6,17 @@ hardware: CTranslate2 and sherpa-onnx take "cpu"/"cuda", torch takes
 providers. Resolving that in one place keeps the string-sniffing out of the five
 handlers, and keeps the rules testable without any backend installed.
 
-Accepted values are "cpu", "cuda", and "cuda:N". Anything else is passed through
+Accepted values are "cpu", "cuda", "cuda:N", "vulkan", and "vulkan:N". Vulkan
+reaches only qwen3-asr, through onnxruntime's WebGPU execution provider (Dawn
+runs on Vulkan on Linux); every other backend runs on the CPU when it is
+selected, with a warning from ModelLoader. Anything else is passed through
 unchanged to the torch- and CTranslate2-based backends (so "auto", "mps", or
-"xpu" still reach the library that understands them) and treated as CPU for the
-onnxruntime-based ones, which need an explicit provider list.
+"xpu" still reach the library that understands them) and treated as CPU for
+the onnxruntime-based ones, which need an explicit provider list.
 """
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,6 +26,13 @@ OnnxProvider = Union[str, Tuple[str, Dict[str, Any]]]
 
 _CPU_PROVIDER = "CPUExecutionProvider"
 _CUDA_PROVIDER = "CUDAExecutionProvider"
+_WEBGPU_PROVIDER = "WebGpuExecutionProvider"
+
+
+# The WebGPU plugin library is registered with onnxruntime once per process;
+# registering the same name twice is an error.
+_webgpu_lock = threading.Lock()
+_webgpu_registered = False
 
 
 def is_gpu(device: str) -> bool:
@@ -31,6 +42,16 @@ def is_gpu(device: str) -> bool:
     project can target (CTranslate2 has no ROCm or XPU backend at all).
     """
     return device.strip().lower().startswith("cuda")
+
+
+def is_vulkan(device: str) -> bool:
+    """Report whether a device string names a Vulkan GPU ("vulkan", "vulkan:N").
+
+    Kept apart from is_gpu(), which gates CUDA-only choices (float16 compute,
+    GPU model defaults, sherpa's CUDA provider) that do not apply here.
+    """
+    base, _, _ = device.strip().lower().partition(":")
+    return base == "vulkan"
 
 
 def device_index(device: str) -> Optional[int]:
@@ -51,8 +72,12 @@ def torch_device(device: str) -> str:
 
     torch understands "cuda" and "cuda:N" directly, so this is a passthrough
     that exists to normalize whitespace and to give the handlers a single named
-    entry point alongside the other translations here.
+    entry point alongside the other translations here. torch has no Vulkan
+    device that runs these models, so "vulkan" becomes "cpu".
     """
+    if is_vulkan(device):
+        return "cpu"
+
     return device.strip()
 
 
@@ -61,7 +86,12 @@ def ctranslate2_device(device: str) -> Tuple[str, Optional[int]]:
 
     CTranslate2 takes the ordinal as a separate ``device_index`` argument rather
     than as part of the device string, so "cuda:1" has to be split apart.
+    CTranslate2 has no Vulkan backend and rejects device names it does not
+    know, so "vulkan" becomes "cpu".
     """
+    if is_vulkan(device):
+        return "cpu", None
+
     index = device_index(device)
     if index is None:
         return device.strip(), None
@@ -94,6 +124,80 @@ def onnx_providers(device: str) -> List[OnnxProvider]:
         return [_CUDA_PROVIDER, _CPU_PROVIDER]
 
     return [(_CUDA_PROVIDER, {"device_id": index}), _CPU_PROVIDER]
+
+
+def webgpu_ep_device(ort: Any) -> Optional[Any]:
+    """Register the WebGPU plugin EP with ``ort`` and return its OrtEpDevice.
+
+    The plugin comes from the onnxruntime-ep-webgpu package, which loads into
+    the stock onnxruntime rather than replacing it (so, unlike onnxruntime-gpu,
+    faster-whisper's dependency on onnxruntime cannot clobber it). Returns None,
+    with a warning, when the plugin is missing or finds no adapter; the caller
+    then runs on the CPU. Takes the onnxruntime module as an argument so this
+    module stays importable without it.
+    """
+    global _webgpu_registered  # pylint: disable=global-statement
+
+    try:
+        # pylint: disable-next=import-outside-toplevel
+        import onnxruntime_ep_webgpu  # type: ignore[import-not-found]
+    except ImportError:
+        _LOGGER.warning(
+            "Device 'vulkan' needs the onnxruntime-ep-webgpu package "
+            "(the qwen3_asr_vulkan extra); running on the CPU"
+        )
+        return None
+
+    with _webgpu_lock:
+        if not _webgpu_registered:
+            try:
+                ort.register_execution_provider_library(
+                    "webgpu", onnxruntime_ep_webgpu.get_library_path()
+                )
+            except Exception:  # pylint: disable=broad-exception-caught
+                _LOGGER.exception(
+                    "Could not register the WebGPU execution provider; "
+                    "running on the CPU"
+                )
+                return None
+            _webgpu_registered = True
+
+    ep_device = next(
+        (d for d in ort.get_ep_devices() if d.ep_name == _WEBGPU_PROVIDER), None
+    )
+    if ep_device is None:
+        _LOGGER.warning(
+            "The WebGPU execution provider found no GPU adapter. Is a Vulkan "
+            "driver (and libvulkan.so.1) installed? Running on the CPU"
+        )
+    return ep_device
+
+
+def onnx_session_args(
+    ort: Any, options: Any, device: str
+) -> Tuple[Dict[str, Any], Optional[Any]]:
+    """Return InferenceSession keyword arguments for ``device``, and the WebGPU
+    device they use (None unless they put the session on Vulkan).
+
+    For CPU and CUDA this is ``options`` plus onnx_providers(). For Vulkan the
+    plugin EP is attached to ``options`` itself (plugin EPs are selected through
+    the session options, not the providers list), with onnxruntime's CPU
+    provider covering the shape ops it hands back. When Vulkan cannot be used,
+    webgpu_ep_device() has already said why, and these are the CPU arguments.
+    """
+    if is_vulkan(device):
+        ep_device = webgpu_ep_device(ort)
+        if ep_device is not None:
+            index = device_index(device)
+            ep_options = {} if index is None else {"adapterIndex": str(index)}
+            options.add_provider_for_devices([ep_device], ep_options)
+            # The WebGPU EP hands shape ops back to the CPU on purpose, and
+            # onnxruntime warns about each of them at session creation. Keep
+            # errors only.
+            options.log_severity_level = 3
+            return {"sess_options": options}, ep_device
+
+    return {"sess_options": options, "providers": onnx_providers(device)}, None
 
 
 def warn_if_no_onnx_gpu(device: str, providers: Sequence[str]) -> bool:

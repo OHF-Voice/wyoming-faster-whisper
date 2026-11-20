@@ -74,8 +74,10 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for inference: cpu, cuda, or cuda:N (default: cpu). "
-        "CUDA requires the GPU image or GPU-enabled wheels; see README.",
+        help="Device to use for inference: cpu, cuda, cuda:N, vulkan, or vulkan:N "
+        "(default: cpu). CUDA requires the GPU image or GPU-enabled wheels; "
+        "vulkan runs qwen3-asr only and needs the qwen3_asr_vulkan extra. "
+        "See README.",
     )
     parser.add_argument(
         "--language",

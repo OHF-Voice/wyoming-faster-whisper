@@ -1,4 +1,9 @@
-FROM debian:bookworm-slim
+# Ubuntu 26.10 for its Mesa 26.2. qwen3-asr on --device vulkan runs its encoder
+# and prompt prefill twice as fast on Mesa 26.2 as on 25.2 (Ubuntu 24.04) or
+# 26.0 (Ubuntu 26.04), about 1.5x per command. 26.10 is not an LTS release (it
+# is supported until July 2027): move on to 27.04 and then 28.04 LTS, and
+# check that the Mesa version does not go backwards when you do.
+FROM ubuntu:26.10
 ARG TARGETARCH
 ARG TARGETVARIANT
 
@@ -6,12 +11,20 @@ ARG TARGETVARIANT
 WORKDIR /usr/src
 
 COPY ./pyproject.toml ./
+# libvulkan1 and mesa-vulkan-drivers let qwen3-asr run on an AMD or Intel GPU
+# with `--device vulkan` and `docker run --device /dev/dri` (see README). Mesa's
+# lavapipe driver is removed: it is Vulkan on the CPU, and without a GPU passed
+# in it would be picked as the "GPU" and run slower than the native CPU path.
+# With it gone, a missing /dev/dri logs a warning and falls back to the CPU.
 RUN \
     apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
+        libvulkan1 \
+        mesa-vulkan-drivers \
+    && rm -f /usr/share/vulkan/icd.d/lvp_icd*.json \
     \
     && python3 -m venv .venv \
     && .venv/bin/pip3 install --no-cache-dir -U \
@@ -23,7 +36,7 @@ RUN \
     \
     && .venv/bin/pip3 install --no-cache-dir \
         --extra-index-url https://www.piwheels.org/simple \
-        -e '.[zeroconf,transformers,sherpa,onnx-asr,qwen3-asr,hass]' \
+        -e '.[zeroconf,transformers,sherpa,onnx-asr,qwen3-asr-vulkan,hass]' \
     \
     && rm -rf /var/lib/apt/lists/*
 

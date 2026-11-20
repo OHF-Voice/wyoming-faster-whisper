@@ -2,6 +2,26 @@
 
 ## 3.10.0
 
+- Add `--device vulkan` (or `vulkan:N` for a specific adapter), which runs
+  `qwen3-asr` on any GPU with a Vulkan driver (AMD and Intel included) through
+  onnxruntime's WebGPU execution provider. Install the `qwen3_asr_vulkan` extra.
+  It is a plugin for the stock `onnxruntime`, so unlike `onnxruntime-gpu` it
+  does not conflict with the CPU package that faster-whisper pulls in. The
+  decoder's KV cache stays in GPU memory between tokens. In the Docker image
+  on a Radeon RX 580, against 4 CPU threads, a voice command takes 293 ms
+  instead of 480 ms with the 0.6B model, and 414 ms instead of 905 ms with the
+  1.7B one, with identical transcripts (Mesa 26.2; older Mesa gains less). With
+  `--qwen3-asr-streaming` the transcript is ready 174 ms (0.6B) and 255 ms
+  (1.7B) after the audio stops, instead of 378 ms and 706 ms
+  - Every other backend runs on the CPU under `--device vulkan`, and the server
+    logs a warning when it loads one. qwen3-asr falls back to the CPU, with a
+    warning, when the GPU cannot be used
+  - On Vulkan, qwen3-asr decodes a second of silence while loading, so the
+    first command is not 150-200 ms slower than the rest
+  - The Docker image includes the plugin and Mesa's Vulkan drivers, so
+    `docker run --device /dev/dri -e WYO_WHISPER_DEVICE=vulkan` runs
+    qwen3-asr on an AMD or Intel GPU without a separate image
+
 - `--cpu-threads` now defaults to `0`, meaning one thread per physical CPU core
   this process may use, instead of a fixed 4. Hyperthreads are not counted, as a
   second thread on the same core slows inference down, and CPU affinity
@@ -43,6 +63,11 @@
   less memory, but transcribes short commands about 2% slower. Other backends
   are unchanged in speed
 
+- The Docker image is now based on Ubuntu 26.10 instead of Debian bookworm, for
+  its Mesa 26.2: `qwen3-asr` on Vulkan runs about 1.5x faster there than on
+  Mesa 25.2 (Ubuntu 24.04) or 26.0 (Ubuntu 26.04). 26.10 is not an LTS release,
+  so the base has to move on to 27.04 and then 28.04 LTS. Python goes from 3.11
+  to 3.14
 - Add `--qwen3-asr-streaming`, which transcribes `qwen3-asr` while the audio is
   still arriving: all audio so far is decoded again every 2 seconds, each pass
   checking the previous pass's transcript as a draft. Draft tokens that match

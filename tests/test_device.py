@@ -4,6 +4,8 @@ Dependency-free: the point of wyoming_faster_whisper.device is that the rules ca
 be checked without torch, onnxruntime, or sherpa-onnx installed.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from wyoming_faster_whisper.device import (
@@ -11,7 +13,9 @@ from wyoming_faster_whisper.device import (
     device_index,
     disable_onnx_spinning,
     is_gpu,
+    is_vulkan,
     onnx_providers,
+    onnx_session_args,
     resolve_compute_type,
     sherpa_provider,
     torch_device,
@@ -139,6 +143,117 @@ def test_missing_cuda_provider_warns(caplog) -> None:
     assert not warn_if_no_onnx_gpu("cuda", ["CPUExecutionProvider"])
     assert len(caplog.records) == 1
     assert "onnxruntime-gpu" in caplog.records[0].getMessage()
+
+
+# --- Vulkan (WebGPU) --------------------------------------------------------
+
+
+@pytest.mark.parametrize("device", ["vulkan", "vulkan:1", "VULKAN", " vulkan "])
+def test_vulkan_is_vulkan(device) -> None:
+    assert is_vulkan(device)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "cuda:0", "auto", "webgpu", ""])
+def test_others_are_not_vulkan(device) -> None:
+    assert not is_vulkan(device)
+
+
+def test_vulkan_is_not_cuda() -> None:
+    # is_gpu() gates CUDA-only choices (float16, GPU model defaults, sherpa's
+    # CUDA provider); none of them apply to Vulkan.
+    assert not is_gpu("vulkan")
+    assert resolve_compute_type("default", "vulkan") == "default"
+    assert sherpa_provider("vulkan") == "cpu"
+
+
+def test_vulkan_index_is_parsed() -> None:
+    assert device_index("vulkan:1") == 1
+
+
+def test_non_onnx_backends_fall_back_to_cpu_on_vulkan() -> None:
+    # CTranslate2 rejects device names it does not know, and torch has no
+    # Vulkan device that runs these models.
+    assert ctranslate2_device("vulkan") == ("cpu", None)
+    assert ctranslate2_device("vulkan:1") == ("cpu", None)
+    assert torch_device("vulkan") == "cpu"
+    assert onnx_providers("vulkan") == ["CPUExecutionProvider"]
+
+
+def test_vulkan_is_not_a_cuda_warning(caplog) -> None:
+    # Vulkan has its own warnings (webgpu_ep_device, the qwen3-asr handler's
+    # fallback, ModelLoader for other backends); this one is CUDA's alone, so
+    # a CPU fallback is reported once rather than twice.
+    assert not warn_if_no_onnx_gpu("vulkan", ["CPUExecutionProvider"])
+    assert not caplog.records
+
+
+class _FakeEpDevice:
+    ep_name = "WebGpuExecutionProvider"
+
+
+class _FakeOrt:
+    """Stand-in for the onnxruntime module's plugin-EP API."""
+
+    def __init__(self, devices) -> None:
+        self.devices = devices
+        self.registered: list = []
+
+    def register_execution_provider_library(self, name: str, path: str) -> None:
+        self.registered.append((name, path))
+
+    def get_ep_devices(self):
+        return self.devices
+
+
+class _RecordingProviderOptions:
+    def __init__(self) -> None:
+        self.added: list = []
+        self.log_severity_level = 2
+
+    def add_provider_for_devices(self, devices, options) -> None:
+        self.added.append((devices, options))
+
+
+def test_session_args_without_vulkan_use_the_providers_list() -> None:
+    options = _RecordingProviderOptions()
+    args, webgpu_device = onnx_session_args(_FakeOrt([]), options, "cuda:1")
+
+    assert args["providers"] == onnx_providers("cuda:1")
+    assert args["sess_options"] is options
+    assert webgpu_device is None
+    assert not options.added
+
+
+def test_session_args_attach_the_webgpu_device(monkeypatch) -> None:
+    pytest.importorskip("onnxruntime_ep_webgpu")
+    monkeypatch.setattr(
+        "wyoming_faster_whisper.device._webgpu_registered", False, raising=True
+    )
+    ep_device = _FakeEpDevice()
+    cpu_device = SimpleNamespace(ep_name="CPUExecutionProvider")
+    fake_ort = _FakeOrt([cpu_device, ep_device])
+    options = _RecordingProviderOptions()
+
+    args, webgpu_device = onnx_session_args(fake_ort, options, "vulkan:1")
+
+    assert args == {"sess_options": options}
+    assert webgpu_device is ep_device
+    assert options.added == [([ep_device], {"adapterIndex": "1"})]
+    assert len(fake_ort.registered) == 1
+
+
+def test_session_args_fall_back_to_cpu_without_an_adapter(monkeypatch) -> None:
+    pytest.importorskip("onnxruntime_ep_webgpu")
+    monkeypatch.setattr(
+        "wyoming_faster_whisper.device._webgpu_registered", True, raising=True
+    )
+    options = _RecordingProviderOptions()
+
+    args, webgpu_device = onnx_session_args(_FakeOrt([]), options, "vulkan")
+
+    assert args["providers"] == ["CPUExecutionProvider"]
+    assert webgpu_device is None
+    assert not options.added
 
 
 # --- disable_onnx_spinning --------------------------------------------------
