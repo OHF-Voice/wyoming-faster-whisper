@@ -101,6 +101,13 @@ _ALLOW_PATTERNS = [
 # Presence of this file selects the merged layout.
 _MERGED_DECODER = "decoder_merged.int4.onnx"
 
+# Optional input of the merged decoder and of decoder_init (same name and
+# meaning as in transformers): compute logits only for the last this-many
+# positions. A prefill of ~100 positions reads one or a few rows, and the
+# 151936-wide lm_head over the rest was 16-21% of prefill time on the CPU, plus
+# ~60 MB copied to the host on Vulkan.
+_NUM_LOGITS_TO_KEEP = "num_logits_to_keep"
+
 # Streaming (--qwen3-asr-streaming): decode all audio so far again every this
 # many seconds of new audio, checking the previous pass's transcript as a draft.
 _STREAM_CHUNK_SECONDS = 2.0
@@ -286,6 +293,19 @@ def _continue_greedy(
     return tokens[:_MAX_NEW_TOKENS]
 
 
+def _takes_num_logits_to_keep(session: ort.InferenceSession) -> bool:
+    """Whether a decoder graph can skip the logits of positions nobody reads.
+
+    Older exports lack the input and return logits for every position. Newer
+    ones give it a default of "all of them", so that older callers still work,
+    which makes onnxruntime list it as an overridable initializer, not an input.
+    """
+    return _NUM_LOGITS_TO_KEEP in {
+        arg.name
+        for arg in session.get_inputs() + session.get_overridable_initializers()
+    }
+
+
 def _causal_mask(q_len: int, past_len: int) -> np.ndarray:
     """[1, 1, q_len, past_len + q_len] additive mask for the merged decoder.
 
@@ -346,6 +366,7 @@ class Qwen3AsrTranscriber(Transcriber):
         warn_if_no_onnx_gpu(device, self._encoder.get_providers())
 
         self._merged: Optional[ort.InferenceSession] = None
+        self._keeps_logits = False
         self._decoder_init: Optional[ort.InferenceSession] = None
         self._decoder_step: Optional[ort.InferenceSession] = None
 
@@ -360,11 +381,13 @@ class Qwen3AsrTranscriber(Transcriber):
             self._empty_kv = np.zeros(
                 (kv_shape[0], 1, kv_shape[2], 0, kv_shape[4]), dtype=np.float32
             )
+            self._keeps_logits = _takes_num_logits_to_keep(self._merged)
             _LOGGER.debug("Using merged decoder (biasing prompt KV is reused)")
         else:
             self._decoder_init = ort.InferenceSession(
                 str(model_dir / "decoder_init.int4.onnx"), **session_args
             )
+            self._keeps_logits = _takes_num_logits_to_keep(self._decoder_init)
             self._decoder_step = ort.InferenceSession(
                 str(model_dir / "decoder_step.int4.onnx"), **session_args
             )
@@ -460,23 +483,31 @@ class Qwen3AsrTranscriber(Transcriber):
         positions: Union[Sequence[int], np.ndarray],
         past_keys: np.ndarray,
         past_values: np.ndarray,
+        num_logits: int,
         run_options: Optional[ort.RunOptions] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """One pass of the merged decoder over ``input_embeds``."""
+        """One pass of the merged decoder over ``input_embeds``.
+
+        Returns logits for the last ``num_logits`` positions only. With an export
+        that takes num_logits_to_keep, the others are never computed; with an
+        older one they are computed and dropped here.
+        """
         assert self._merged is not None
-        return self._merged.run(
-            ["logits", "present_keys", "present_values"],
-            {
-                "input_embeds": input_embeds,
-                "position_ids": np.asarray(positions, dtype=np.int64)[np.newaxis, :],
-                "attention_mask": _causal_mask(
-                    input_embeds.shape[1], past_keys.shape[3]
-                ),
-                "past_keys": past_keys,
-                "past_values": past_values,
-            },
-            run_options,
+        assert num_logits >= 1  # 0 would mean "every position" to the graph
+        feeds = {
+            "input_embeds": input_embeds,
+            "position_ids": np.asarray(positions, dtype=np.int64)[np.newaxis, :],
+            "attention_mask": _causal_mask(input_embeds.shape[1], past_keys.shape[3]),
+            "past_keys": past_keys,
+            "past_values": past_values,
+        }
+        if self._keeps_logits:
+            feeds[_NUM_LOGITS_TO_KEEP] = np.array([num_logits], dtype=np.int64)
+
+        logits, keys, values = self._merged.run(
+            ["logits", "present_keys", "present_values"], feeds, run_options
         )
+        return logits[:, -num_logits:], keys, values
 
     def _prefix_cache(
         self, system_ids: List[int], run_options: Optional[ort.RunOptions] = None
@@ -495,6 +526,7 @@ class Qwen3AsrTranscriber(Transcriber):
             np.arange(len(system_ids)),
             self._empty_kv,
             self._empty_kv,
+            1,  # only the KV is wanted; the graph has no way to ask for none
             run_options,
         )
 
@@ -531,6 +563,7 @@ class Qwen3AsrTranscriber(Transcriber):
             np.arange(n_system, len(prompt_ids) + len(draft)),
             past_keys,
             past_values,
+            len(draft) + 1,  # the last prompt position and each draft token
             run_options,
         )
 
@@ -542,11 +575,12 @@ class Qwen3AsrTranscriber(Transcriber):
                 np.arange(position, position + len(tokens)),
                 keys,
                 values,
+                len(tokens),
                 run_options,
             )
 
         return _continue_greedy(
-            logits[0, len(rest) - len(draft) - 1 :],
+            logits[0],
             draft,
             len(prompt_ids),
             past_keys,
@@ -566,20 +600,20 @@ class Qwen3AsrTranscriber(Transcriber):
         assert (self._decoder_init is not None) and (self._decoder_step is not None)
         decoder_step = self._decoder_step
         input_ids = prompt_ids + list(draft)
+        # The last prompt position and each draft token.
+        num_logits = len(draft) + 1
+
+        feeds = {
+            "input_ids": np.array(input_ids, dtype=np.int64)[np.newaxis, :],
+            "position_ids": np.arange(len(input_ids), dtype=np.int64)[np.newaxis, :],
+            "audio_features": audio_features,
+            "audio_offset": np.array([prompt_ids.index(_AUDIO_PAD)], dtype=np.int64),
+        }
+        if self._keeps_logits:
+            feeds[_NUM_LOGITS_TO_KEEP] = np.array([num_logits], dtype=np.int64)
 
         logits, past_keys, past_values = self._decoder_init.run(
-            ["logits", "present_keys", "present_values"],
-            {
-                "input_ids": np.array(input_ids, dtype=np.int64)[np.newaxis, :],
-                "position_ids": np.arange(len(input_ids), dtype=np.int64)[
-                    np.newaxis, :
-                ],
-                "audio_features": audio_features,
-                "audio_offset": np.array(
-                    [prompt_ids.index(_AUDIO_PAD)], dtype=np.int64
-                ),
-            },
-            run_options,
+            ["logits", "present_keys", "present_values"], feeds, run_options
         )
 
         def step(
@@ -600,7 +634,7 @@ class Qwen3AsrTranscriber(Transcriber):
             )
 
         return _continue_greedy(
-            logits[0, len(prompt_ids) - 1 :],
+            logits[0, -num_logits:],
             draft,
             len(prompt_ids),
             past_keys,

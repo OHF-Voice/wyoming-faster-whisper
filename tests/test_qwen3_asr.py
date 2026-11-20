@@ -194,6 +194,9 @@ class _FakeSession:
     def get_inputs(self):
         return [SimpleNamespace(name="mel")]
 
+    def get_overridable_initializers(self):
+        return []
+
     def get_outputs(self):
         # logits, then present_keys/present_values shaped
         # [num_layers, batch, kv_heads, seq, head_dim] with the batch and
@@ -297,6 +300,119 @@ def test_prefix_cache_starts_empty(tmp_path, stub_runtime) -> None:
     )
     assert model._prefix_key is None
     assert model._prefix_kv is None
+
+
+# --- merged decoder: num_logits_to_keep -----------------------------------
+
+
+def test_older_merged_exports_return_every_logit_row(tmp_path, stub_runtime) -> None:
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=True)), str(tmp_path)
+    )
+    assert not model._keeps_logits
+
+
+@pytest.mark.parametrize("merged", [True, False])
+@pytest.mark.parametrize("listed_as", ["input", "overridable initializer"])
+def test_num_logits_to_keep_is_detected_by_name(
+    tmp_path, stub_runtime, monkeypatch, listed_as, merged
+) -> None:
+    # A required input, or (as published, so older callers can omit it) an
+    # input with a default, which onnxruntime lists as an initializer instead.
+    keep = [SimpleNamespace(name="num_logits_to_keep")]
+
+    class KeepsLogits(_FakeSession):
+        def get_inputs(self):
+            return super().get_inputs() + (keep if listed_as == "input" else [])
+
+        def get_overridable_initializers(self):
+            return keep if listed_as != "input" else []
+
+    monkeypatch.setattr(qwen3_asr_handler.ort, "InferenceSession", KeepsLogits)
+    model = qwen3_asr_handler.Qwen3AsrTranscriber(
+        str(_fake_model_dir(tmp_path, merged=merged)), str(tmp_path)
+    )
+    assert model._keeps_logits
+
+
+class _MergedGraph:
+    """Runs like the merged decoder: logits row i is filled with position i."""
+
+    def __init__(self, keeps_logits: bool) -> None:
+        self.keeps_logits = keeps_logits
+        self.feeds: list = []
+
+    def run(self, names, feeds, run_options=None):
+        self.feeds.append(feeds)
+        positions = feeds["position_ids"][0].astype(np.float32)
+        if self.keeps_logits:
+            positions = positions[-int(feeds["num_logits_to_keep"][0]) :]
+        logits = np.repeat(positions[np.newaxis, :, np.newaxis], 3, axis=-1)
+        kv = np.zeros((2, 1, 1, len(feeds["position_ids"][0]), 4), dtype=np.float32)
+        return [logits, kv, kv]
+
+
+@pytest.mark.parametrize("keeps_logits", [True, False])
+def test_run_merged_returns_only_the_requested_rows(keeps_logits) -> None:
+    model = qwen3_asr_handler.Qwen3AsrTranscriber.__new__(
+        qwen3_asr_handler.Qwen3AsrTranscriber
+    )
+    model._merged = _MergedGraph(keeps_logits)
+    model._keeps_logits = keeps_logits
+    empty = np.zeros((2, 1, 1, 0, 4), dtype=np.float32)
+
+    logits, _, _ = model._run_merged(
+        np.zeros((1, 5, 8), dtype=np.float32), np.arange(10, 15), empty, empty, 2
+    )
+
+    assert logits.shape == (1, 2, 3)
+    np.testing.assert_array_equal(logits[0, :, 0], [13, 14])
+    (feeds,) = model._merged.feeds
+    if keeps_logits:
+        np.testing.assert_array_equal(feeds["num_logits_to_keep"], [2])
+        assert feeds["num_logits_to_keep"].dtype == np.int64
+    else:
+        # An older graph would reject an input it does not have.
+        assert "num_logits_to_keep" not in feeds
+
+
+class _DecoderInit:
+    """Runs like decoder_init: every row predicts token 5 except the last (EOS)."""
+
+    def __init__(self, keeps_logits: bool) -> None:
+        self.keeps_logits = keeps_logits
+        self.feeds: list = []
+
+    def run(self, names, feeds, run_options=None):
+        self.feeds.append(feeds)
+        rows = len(feeds["input_ids"][0])
+        if self.keeps_logits:
+            rows = min(rows, int(feeds["num_logits_to_keep"][0]))
+        logits = np.zeros((1, rows, _EOS + 1), dtype=np.float32)
+        logits[0, :, 5] = 1.0
+        logits[0, -1, _EOS] = 2.0
+        kv = np.zeros((2, 1, 1, len(feeds["input_ids"][0]), 4), dtype=np.float32)
+        return [logits, kv, kv]
+
+
+@pytest.mark.parametrize("keeps_logits", [True, False])
+def test_split_prefill_reads_the_last_prompt_row(keeps_logits) -> None:
+    model = qwen3_asr_handler.Qwen3AsrTranscriber.__new__(
+        qwen3_asr_handler.Qwen3AsrTranscriber
+    )
+    model._decoder_init = _DecoderInit(keeps_logits)
+    model._decoder_step = object()  # EOS comes from the prefill: never stepped
+    model._keeps_logits = keeps_logits
+    prompt_ids = [1, _AUDIO_PAD, 2, 3]
+
+    tokens = model._generate(np.zeros((1, 1, 8), dtype=np.float32), prompt_ids, [])
+
+    assert tokens == [_EOS]
+    (feeds,) = model._decoder_init.feeds
+    if keeps_logits:
+        np.testing.assert_array_equal(feeds["num_logits_to_keep"], [1])
+    else:
+        assert "num_logits_to_keep" not in feeds
 
 
 def test_allow_patterns_cover_both_decoder_layouts() -> None:

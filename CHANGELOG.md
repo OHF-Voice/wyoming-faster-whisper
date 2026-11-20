@@ -2,6 +2,14 @@
 
 ## 3.10.0
 
+- qwen3-asr computes logits only for the positions it reads when the decoder
+  (`decoder_merged`, or the split layout's `decoder_init`) takes a
+  `num_logits_to_keep` input, instead of running the 151936-wide `lm_head`
+  over the whole prefill and discarding all but a row or two (#155).
+  `craigandrews/qwen3-asr-1.7b-onnx-int4-merged` has it: a 100-token prefill
+  takes 603 ms instead of 720 ms on 4 threads of a Ryzen 7 5700X, with
+  identical transcripts. Models without the input work as before
+
 - `--cpu-threads` now defaults to `0`, meaning one thread per physical CPU core
   this process may use, instead of a fixed 4. Hyperthreads are not counted, as a
   second thread on the same core slows inference down, and CPU affinity

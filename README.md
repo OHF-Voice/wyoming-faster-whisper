@@ -282,6 +282,11 @@ it unchanged:
 --stt-library qwen3-asr --model craigandrews/qwen3-asr-1.7b-onnx-int4-merged
 ```
 
+Since revision `d6608a0` its decoder takes `num_logits_to_keep`, so a prefill
+runs `lm_head` only on the positions that are read (#155). On a desktop CPU
+that takes 16% off a 100-token prefill (about 5% of a whole command) compared
+with `d809a7c`, the revision measured below.
+
 It is for a desktop CPU or a GPU, not a Raspberry Pi: on a Pi 5 the 0.6B model
 already needs 1.55 GB and 2.2s for a 3.2s command with 50 names (see the table
 above), and the 1.7B model took about twice the time and 1.8 times the memory on
