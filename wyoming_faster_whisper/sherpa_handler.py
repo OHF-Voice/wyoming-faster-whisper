@@ -13,7 +13,7 @@ import numpy as np
 import sherpa_onnx as so
 
 from .const import StreamingSession, Transcriber
-from .device import is_gpu, sherpa_provider
+from .device import is_gpu, sherpa_provider, sherpa_session_provider
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ class SherpaTranscriber(Transcriber):
             decoder=_find_model_file(model_dir, "decoder", prefer_int8),
             joiner=_find_model_file(model_dir, "joiner", prefer_int8),
             tokens=f"{model_dir}/tokens.txt",
-            provider=provider,
+            provider=sherpa_session_provider(provider),
             model_type="nemo_transducer",
         )
 
@@ -281,7 +281,7 @@ class SherpaStreamingTranscriber(Transcriber):
             joiner=_find_model_file(model_dir, "joiner", prefer_int8),
             tokens=str(model_dir / "tokens.txt"),
             num_threads=cpu_threads,
-            provider=provider,
+            provider=sherpa_session_provider(provider),
             decoding_method=decoding_method,
             max_active_paths=max(beam_size, 1),
         )
