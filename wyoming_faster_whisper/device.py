@@ -13,9 +13,13 @@ onnxruntime-based ones, which need an explicit provider list.
 """
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 _LOGGER = logging.getLogger(__name__)
+
+# Provider config file for sherpa-onnx on the CPU, see sherpa_session_provider().
+SHERPA_CPU_CONFIG = Path(__file__).parent / "sherpa_session.cfg"
 
 # Execution provider entries are either a name or (name, options).
 OnnxProvider = Union[str, Tuple[str, Dict[str, Any]]]
@@ -158,3 +162,19 @@ def disable_onnx_spinning(options: Any) -> Any:
     options.add_session_config_entry("session.intra_op.allow_spinning", "0")
     options.add_session_config_entry("session.inter_op.allow_spinning", "0")
     return options
+
+
+def sherpa_session_provider(provider: str) -> str:
+    """Return the provider string to give sherpa-onnx when loading a model.
+
+    sherpa-onnx creates its onnxruntime sessions itself, so there is no
+    SessionOptions to pass to disable_onnx_spinning(). It does accept a config
+    file as "<provider>:<path>" and hands keys prefixed with "SessionConfig." to
+    SessionOptions.AddConfigEntry (sherpa-onnx 1.13.5 and later). On the CPU,
+    point it at a file that turns thread spinning off, as for the other
+    onnxruntime backends (issue #135). Other providers are returned unchanged.
+    """
+    if provider != "cpu":
+        return provider
+
+    return f"{provider}:{SHERPA_CPU_CONFIG}"

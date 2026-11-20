@@ -4,9 +4,12 @@ Dependency-free: the point of wyoming_faster_whisper.device is that the rules ca
 be checked without torch, onnxruntime, or sherpa-onnx installed.
 """
 
+from pathlib import Path
+
 import pytest
 
 from wyoming_faster_whisper.device import (
+    SHERPA_CPU_CONFIG,
     ctranslate2_device,
     device_index,
     disable_onnx_spinning,
@@ -14,6 +17,7 @@ from wyoming_faster_whisper.device import (
     onnx_providers,
     resolve_compute_type,
     sherpa_provider,
+    sherpa_session_provider,
     torch_device,
     warn_if_no_onnx_gpu,
 )
@@ -161,4 +165,33 @@ def test_disable_onnx_spinning_turns_off_both_pools() -> None:
     assert options.entries == {
         "session.intra_op.allow_spinning": "0",
         "session.inter_op.allow_spinning": "0",
+    }
+
+
+# --- sherpa_session_provider ------------------------------------------------
+
+
+def test_sherpa_session_provider_points_the_cpu_at_the_config_file() -> None:
+    name, path = sherpa_session_provider("cpu").split(":", 1)
+
+    assert name == "cpu"
+    assert Path(path) == SHERPA_CPU_CONFIG
+
+
+def test_sherpa_session_provider_leaves_cuda_alone() -> None:
+    assert sherpa_session_provider("cuda") == "cuda"
+
+
+def test_sherpa_cpu_config_turns_off_both_pools() -> None:
+    # Read the file the way sherpa-onnx does: key=value per line, # comments.
+    entries = {}
+    for line in SHERPA_CPU_CONFIG.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            entries[key.strip()] = value.strip()
+
+    assert entries == {
+        "SessionConfig.session.intra_op.allow_spinning": "0",
+        "SessionConfig.session.inter_op.allow_spinning": "0",
     }

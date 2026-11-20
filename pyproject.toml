@@ -41,6 +41,9 @@ include-package-data = true
 include = ["wyoming_faster_whisper"]
 exclude = ["tests"]
 
+[tool.setuptools.package-data]
+wyoming_faster_whisper = ["sherpa_session.cfg"]
+
 [project.scripts]
 wyoming-faster-whisper = "wyoming_faster_whisper.__main__:run"
 
@@ -75,7 +78,9 @@ transformers = [
     "transformers[torch]==5.23.0",
 ]
 sherpa = [
-    "sherpa-onnx>=1.12.19,<3",
+    # 1.13.5: "SessionConfig." keys in provider config files, which
+    # device.sherpa_session_provider() uses to turn off thread spinning.
+    "sherpa-onnx>=1.13.5,<3",
 ]
 onnx_asr = [
     "onnx-asr[cpu,hub]==0.12.0",
